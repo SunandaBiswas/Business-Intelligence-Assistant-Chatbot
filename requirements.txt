@@ -27,6 +27,7 @@ pandas
 sqlalchemy
 pyodbc
 python-calamine
+openpyxl
 
 
 # notebook

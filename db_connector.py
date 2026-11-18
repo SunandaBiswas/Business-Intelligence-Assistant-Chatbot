@@ -1,5 +1,5 @@
 """
-Database connector for the HR Assistant project.
+Database connector for the BI Assistant Bot project.
 
 Connects to the SQL Server database [Register] on localhost\\SQLEXPRESS
 using Windows authentication (no password needed).

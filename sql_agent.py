@@ -1,5 +1,5 @@
 """
-Text-to-SQL engine for the HR Assistant chatbot.
+Text-to-SQL engine for the BI Assistant Bot.
 
 Flow for every question:
   1. pick_tables()    - the LLM chooses the 1-3 most relevant tables (from the table list only)
@@ -11,6 +11,7 @@ Flow for every question:
 
 Needs GROQ_API_KEY in the .env file (see .env.example).
 """
+import io
 import os
 import re
 
@@ -22,7 +23,8 @@ from db_connector import get_engine
 load_dotenv()
 
 MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
-MAX_ROWS = 500          # rows pulled back from SQL Server
+MAX_ROWS = 50_000       # rows pulled back from SQL Server (and exported to Excel)
+PREVIEW_ROWS = 500      # rows shown on screen
 MAX_TABLES = 3          # tables handed to the SQL-writing step
 QUERY_TIMEOUT = 90      # seconds
 HIDDEN_TABLES = {"_catalog", "sysdiagrams"}
@@ -176,9 +178,11 @@ def summarize(question, sql, df, truncated):
     else:
         data_text = df.head(30).to_csv(index=False)[:6000]
     return _chat(
-        "You are an HR/MIS assistant. Answer the question clearly and briefly using ONLY the query "
+        "You are the BI Assistant Bot, a business-intelligence assistant for MIS data. Answer the question clearly and briefly using ONLY the query "
         "result. Give the key numbers (format large numbers with thousands separators). Do not invent "
-        "figures. If the result is empty, say no matching data was found. Mention if results were cut off.",
+        "figures. If the result is empty, say no matching data was found. Mention if results were cut off. "
+        "The app shows a 'Download Excel' button under your answer, so never say you cannot create "
+        "files or reports; if the user wants a report, tell them to use that button.",
         f"Question: {question}\n\nSQL used:\n{sql}\n\nResult ({len(df)} rows"
         f"{', truncated' if truncated else ''}):\n{data_text}")
 
@@ -187,8 +191,37 @@ def chat_only(question, history_text=""):
     return _chat(
         "You are a friendly assistant for an insurance company's MIS data (collection, renewal, claim "
         "and target registers). Reply briefly. If useful, suggest the kind of question you can answer "
-        "from the data.",
+        "from the data. This app CAN produce Excel reports: every answer that returns data has a "
+        "'Download Excel' button, and users can paste their own SQL SELECT query to get its output "
+        "as a report. Never say you cannot create files; explain this instead.",
         f"Conversation so far:\n{history_text or '(none)'}\n\nUser: {question}")
+
+
+# ------------------------------------------------------------------ Excel report
+def extract_sql(text_):
+    """If the user pasted their own SQL (fenced block, or a message that is a SELECT/WITH), return it."""
+    m = re.search(r"```(?:sql|tsql)?\s*(.*?)```", text_, re.S | re.I)
+    candidate = (m.group(1) if m else text_).strip()
+    return candidate if re.match(r"(select|with)\b", candidate, re.I) else None
+
+
+def to_excel_bytes(df, sql=None, sheet_name="Report"):
+    """Build an .xlsx file (data sheet + a sheet with the SQL used) and return its bytes."""
+    from openpyxl.styles import Font
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as xw:
+        df.to_excel(xw, sheet_name=sheet_name, index=False)
+        ws = xw.sheets[sheet_name]
+        ws.freeze_panes = "A2"
+        for cell in ws[1]:
+            cell.font = Font(bold=True)
+        for i, col in enumerate(df.columns, start=1):
+            width = max([len(str(col))] + [len(str(v)) for v in df[col].head(200)]) + 2
+            ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = min(width, 50)
+        if sql:
+            pd.DataFrame({"SQL used": sql.splitlines()}).to_excel(xw, sheet_name="Query", index=False)
+            xw.sheets["Query"].column_dimensions["A"].width = 120
+    return buf.getvalue()
 
 
 # ------------------------------------------------------------------ orchestration
@@ -201,6 +234,17 @@ def ask(question, history=None):
     """Full pipeline. Returns dict(answer, sql, data, tables, truncated, error)."""
     history_text = format_history(history)
     out = {"answer": "", "sql": None, "data": None, "tables": [], "truncated": False, "error": None}
+
+    own_sql = extract_sql(question)               # user pasted their own query: run it as given
+    if own_sql:
+        try:
+            df, truncated = run_query(own_sql)
+            out.update(sql=validate_sql(own_sql), data=df, truncated=truncated)
+            out["answer"] = summarize("Run the SQL query I provided", out["sql"], df, truncated)
+        except Exception as e:                    # noqa: BLE001
+            out.update(sql=own_sql, error=str(e).split("\n")[0][:500],
+                       answer="That query could not be run.")
+        return out
 
     tables = pick_tables(question, history_text)
     out["tables"] = tables
