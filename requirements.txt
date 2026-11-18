@@ -18,6 +18,17 @@ langchain-qdrant
 qdrant-client
 
 
+# Groq SDK (used directly by sql_agent.py)
+groq
+
+# database (SQL Server: db_connector.py, etl/, sql_agent.py)
+
+pandas
+sqlalchemy
+pyodbc
+python-calamine
+
+
 # notebook
 jupyter
 ipykernel
