@@ -3,3 +3,5 @@ hrvenv/
 __pycache__/
 .ipynb_checkpoints/
 text.txt
+test.py
+
