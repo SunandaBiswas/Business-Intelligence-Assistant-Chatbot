@@ -85,8 +85,11 @@ def table_schema(tables, engine=None, sample_rows=3):
 
 
 # ------------------------------------------------------------------ step 1: tables
-def pick_tables(question, history_text=""):
+def pick_tables(question, history_text="", allowed=None):
+    """Choose relevant tables. `allowed` restricts the choice (e.g. to one register's sheets)."""
     tables = list_tables()
+    if allowed:
+        tables = {n: r for n, r in tables.items() if n in set(allowed)}
     listing = "\n".join(f"- {name} ({rows:,} rows)" for name, rows in sorted(tables.items()))
     answer = _chat(
         "You route questions about an insurance company's MIS registers (collections, renewals, "
@@ -98,6 +101,8 @@ def pick_tables(question, history_text=""):
     if answer.strip().upper().startswith("NONE"):
         return []
     picked = [n for n in tables if re.search(rf"(?<![A-Za-z0-9_]){re.escape(n)}(?![A-Za-z0-9_])", answer)]
+    if not picked and allowed:                     # scoped chat: stay inside the chosen register
+        picked = list(tables)
     return picked[:MAX_TABLES]
 
 
@@ -230,9 +235,16 @@ def format_history(history, limit=6):
     return "\n".join(f"{m['role']}: {m['content'][:500]}" for m in (history or [])[-limit:])
 
 
-def ask(question, history=None):
-    """Full pipeline. Returns dict(answer, sql, data, tables, truncated, error)."""
+def ask(question, history=None, allowed_tables=None, focus=None):
+    """Full pipeline. Returns dict(answer, sql, data, tables, truncated, error).
+
+    allowed_tables / focus scope the chat to one register (used by the tiles on the
+    At a glance page): only those tables are considered, and `focus` is its display name.
+    """
     history_text = format_history(history)
+    if focus:
+        history_text = (f"(The user is asking about the register '{focus}'. "
+                        f"Answer only from its tables.)\n" + history_text)
     out = {"answer": "", "sql": None, "data": None, "tables": [], "truncated": False, "error": None}
 
     own_sql = extract_sql(question)               # user pasted their own query: run it as given
@@ -246,7 +258,7 @@ def ask(question, history=None):
                        answer="That query could not be run.")
         return out
 
-    tables = pick_tables(question, history_text)
+    tables = pick_tables(question, history_text, allowed_tables)
     out["tables"] = tables
     if not tables:
         out["answer"] = chat_only(question, history_text)

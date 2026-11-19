@@ -1,0 +1,36 @@
+# Green Delta Insurance look for the BI Assistant Bot: deep green with brand yellow (#FFCA0B).
+# Light page with a dark green sidebar, so the white logo stands out.
+
+[theme]
+base = "light"
+primaryColor = "#0A6B38"              # buttons, selected pills, active elements (white text stays readable)
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#EAF3ED"  # soft green tint for cards and inputs
+textColor = "#14281D"
+linkColor = "#0A6B38"
+borderColor = "#C9DDD0"
+greenColor = "#0B7A3F"
+yellowColor = "#FFCA0B"
+baseRadius = "8px"
+showSidebarBorder = false
+metricValueFontSize = "2rem"          # keeps values like "19 Nov 2026" from being cut off
+
+# Charts: deep green first, brand yellow second, then colours that stay distinct in stacked bars.
+chartCategoricalColors = ["#0A7A3E", "#FFCA0B", "#0F5C6E", "#8CCB6B", "#F28C28", "#5B6B73", "#8A4F7D", "#C9B458", "#3FA7C4", "#B5482F"]
+
+dataframeHeaderBackgroundColor = "#0A5A2F"
+dataframeHeaderTextColor = "#FFFFFF"
+dataframeBorderColor = "#C9DDD0"
+
+[client]
+toolbarMode = "minimal"               # hides the Deploy button; this app runs on your own PC
+
+[theme.sidebar]
+backgroundColor = "#0A5A2F"           # dark green
+secondaryBackgroundColor = "#084A28"  # buttons and inputs sit a shade darker
+codeBackgroundColor = "#084A28"
+codeTextColor = "#FFFFFF"
+textColor = "#FFFFFF"
+linkColor = "#FFE066"
+borderColor = "#3A9A68"
+primaryColor = "#FFCA0B"

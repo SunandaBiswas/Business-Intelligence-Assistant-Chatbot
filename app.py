@@ -1,105 +1,55 @@
 """
-BI Assistant Bot - Streamlit chat UI.
+BI Assistant Bot - Green Delta Insurance, multi-page Streamlit app.
+
+  Chat          app_pages/chat.py     ask questions about the registers, get Excel reports
+  At a glance   app_pages/glance.py   one summary tile per register + the Ask pop-up
+  Summary       app_pages/summary.py  year / class / customer comparison across selected registers
 
 Run:  streamlit run app.py
 """
-from datetime import datetime
-
 import streamlit as st
 
 import sql_agent
-from db_connector import get_engine
+from common import check_database
 
-st.set_page_config(page_title="BI Assistant Bot", page_icon="💬", layout="wide")
+st.set_page_config(page_title="BI ASSISTANT BOT - Green Delta", page_icon="assets/gdic_icon.png",
+                   layout="wide")
+page = st.navigation(
+    [
+        st.Page("app_pages/chat.py", title="Chat", icon=":material/chat:", url_path="chat",
+                help="Ask questions about the MIS registers in plain English, or paste a SQL query. "
+                     "Download any result as an Excel report."),
+        st.Page("app_pages/glance.py", title="At a glance", icon=":material/dashboard:",
+                url_path="glance",
+                help="Summary tiles for every register: rows, date coverage, headline totals and "
+                     "when each file was last updated. Use Ask to question a register."),
+        st.Page("app_pages/summary.py", title="Summary", icon=":material/bar_chart:",
+                url_path="summary",
+                help="Year-wise, class-wise and customer-wise premium, compared across the "
+                     "registers you select, with stacked bar charts."),
+        st.Page("app_pages/excel_reports.py", title="Excel reports", icon=":material/table_view:",
+                url_path="excel",
+                help="Department reports in your standard Excel format, and a pivot generator "
+                     "that delivers plain values or live formulas."),
+    ],
+    position="top",
+)
 
-EXAMPLES = [
-    "How many rows are in the collection register?",
-    "Total premium collected by year from the collection register",
-    "Which 10 branches had the highest claim payments?",
-    "Show the target by distribution channel for 2023",
-]
-
-
-@st.cache_resource
-def check_database():
-    try:
-        with get_engine().connect() as conn:
-            n = conn.exec_driver_sql("SELECT COUNT(*) FROM sys.tables").scalar()
-        return True, f"Connected to Register ({n} tables)"
-    except Exception as e:  # noqa: BLE001
-        return False, f"Database connection failed: {str(e)[:200]}"
-
-
-# ---------------------------------------------------------------- sidebar
 with st.sidebar:
-    st.title("💬 BI Assistant Bot")
-    ok, msg = check_database()
-    (st.success if ok else st.error)(msg)
-    st.caption(f"Model: {sql_agent.MODEL}")
-    if st.button("🗑️ Clear chat", width="stretch"):
-        st.session_state.messages = []
-        st.rerun()
-    st.divider()
-    st.markdown("**Try asking**")
-    for ex in EXAMPLES:
-        if st.button(ex, key=ex, width="stretch"):
-            st.session_state.pending = ex
-
-# ---------------------------------------------------------------- chat
-st.header("Ask questions about your MIS registers")
-st.session_state.setdefault("messages", [])
-
-
-def render(msg, idx):
-    st.markdown(msg["content"])
-    if msg.get("sql"):
-        with st.expander("SQL used"):
-            st.code(msg["sql"], language="sql")
-            if msg.get("tables"):
-                st.caption("Tables: " + ", ".join(msg["tables"]))
-    if msg.get("data") is not None and not msg["data"].empty:
-        total = len(msg["data"])
-        with st.expander(f"Data ({total:,} rows)", expanded=False):
-            st.dataframe(msg["data"].head(sql_agent.PREVIEW_ROWS), width="stretch")
-            if total > sql_agent.PREVIEW_ROWS:
-                st.caption(f"Showing the first {sql_agent.PREVIEW_ROWS:,} rows. "
-                           "The Excel download has all rows.")
-        if msg.get("truncated"):
-            st.caption(f"Result limited to the first {sql_agent.MAX_ROWS:,} rows.")
-        if msg.get("xlsx"):
-            st.download_button("⬇️ Download Excel report", data=msg["xlsx"],
-                               file_name=msg["xlsx_name"], key=f"dl_{idx}",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-
-for i, m in enumerate(st.session_state.messages):
-    with st.chat_message(m["role"]):
-        render(m, i)
-
-question = st.chat_input("Ask about collections, renewals, claims, targets...")
-question = question or st.session_state.pop("pending", None)
-
-if question:
-    history = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages]
-    st.session_state.messages.append({"role": "user", "content": question})
-    with st.chat_message("user"):
-        st.markdown(question)
-
-    with st.chat_message("assistant"):
-        if not ok:
-            reply = {"role": "assistant", "content": msg}
+    # the whole brand block sits in the middle of the sidebar, both across and down
+    with st.container(key="brand"):
+        with st.container(horizontal=True, horizontal_alignment="center"):
+            st.image("assets/gdic_logo.png", width=232, alt="Green Delta Insurance logo")
+        st.subheader("BI ASSISTANT BOT", text_alignment="center")
+        ok, msg = check_database()
+        if ok:
+            st.markdown(f":material/check_circle: {msg}", text_alignment="center")
         else:
-            try:
-                with st.spinner("Thinking..."):
-                    r = sql_agent.ask(question, history)
-                reply = {"role": "assistant", "content": r["answer"], "sql": r["sql"],
-                         "data": r["data"], "tables": r["tables"], "truncated": r["truncated"]}
-                if r["error"]:
-                    reply["content"] += f"\n\n_Last error: {r['error']}_"
-                if r["data"] is not None and not r["data"].empty:
-                    reply["xlsx"] = sql_agent.to_excel_bytes(r["data"], r["sql"])
-                    reply["xlsx_name"] = f"BI_report_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
-            except Exception as e:  # noqa: BLE001
-                reply = {"role": "assistant", "content": f"⚠️ {e}"}
-        render(reply, len(st.session_state.messages))
-    st.session_state.messages.append(reply)
+            st.error(msg)
+        st.caption(f"Model: {sql_agent.MODEL}", text_alignment="center")
+    # Streamlit can't centre sidebar content vertically on its own (the sidebar has no fixed height),
+    # so push just this block down by half the window height minus half the block's own height.
+    st.html("<style>.st-key-brand { margin-top: calc(50vh - 162px); }</style>")
+
+st.title(page.title, icon=page.icon)
+page.run()
