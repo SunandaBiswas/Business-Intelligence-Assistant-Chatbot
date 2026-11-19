@@ -6,3 +6,5 @@ text.txt
 test.py
 .env.example
 etl/logs/
+.streamlit/secrets.toml
+users.db

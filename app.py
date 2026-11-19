@@ -10,12 +10,12 @@ Run:  streamlit run app.py
 import streamlit as st
 
 import sql_agent
+from auth import render_auth_bar
 from common import check_database
 
 st.set_page_config(page_title="BI ASSISTANT BOT - Green Delta", page_icon="assets/gdic_icon.png",
                    layout="wide")
-page = st.navigation(
-    [
+pages = [
         st.Page("app_pages/chat.py", title="Chat", icon=":material/chat:", url_path="chat",
                 help="Ask questions about the MIS registers in plain English, or paste a SQL query. "
                      "Download any result as an Excel report."),
@@ -31,15 +31,15 @@ page = st.navigation(
                 url_path="excel",
                 help="Department reports in your standard Excel format, and a pivot generator "
                      "that delivers plain values or live formulas."),
-    ],
-    position="top",
-)
+    ]
+page = st.navigation(pages, position="top")
 
 with st.sidebar:
     # the whole brand block sits in the middle of the sidebar, both across and down
     with st.container(key="brand"):
         with st.container(horizontal=True, horizontal_alignment="center"):
             st.image("assets/gdic_logo.png", width=232, alt="Green Delta Insurance logo")
+        render_auth_bar()
         st.subheader("BI ASSISTANT BOT", text_alignment="center")
         ok, msg = check_database()
         if ok:
@@ -49,7 +49,7 @@ with st.sidebar:
         st.caption(f"Model: {sql_agent.MODEL}", text_alignment="center")
     # Streamlit can't centre sidebar content vertically on its own (the sidebar has no fixed height),
     # so push just this block down by half the window height minus half the block's own height.
-    st.html("<style>.st-key-brand { margin-top: calc(50vh - 162px); }</style>")
+    st.html("<style>.st-key-brand { margin-top: calc(50vh - 215px); }</style>")
 
 st.title(page.title, icon=page.icon)
 page.run()

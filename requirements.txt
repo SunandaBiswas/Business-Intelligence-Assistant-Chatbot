@@ -53,3 +53,6 @@ openevals
 
 # tests (CI smoke test before evaluation/build/deploy)
 pytest
+
+# Google sign-in (st.login)
+Authlib
