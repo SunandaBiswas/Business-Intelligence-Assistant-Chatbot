@@ -9,7 +9,7 @@ Everything is built from a small "pivot spec":
     date_range           (start, end) or None
     filters              (("in", column, (values...)), ("like", column, "text"), ...)
 
-aggregate() returns the pivot as a table (values straight from SQL Server);
+aggregate() returns the pivot as a table (values straight from the database);
 raw_rows() returns the underlying rows, which the Excel builder writes to a data sheet so the pivot
 cells can be real SUMIFS / COUNTIFS formulas.
 """
@@ -21,6 +21,7 @@ import streamlit as st
 import glance_data as gd
 import summary_data as sm
 from common import shared_engine
+from db_connector import qi
 
 MAX_RAW_ROWS = 100_000          # most rows written to a data sheet (formula reports)
 MAX_PIVOT_ROWS = 500
@@ -35,7 +36,9 @@ _AMOUNT_HINT = re.compile(r"prem|amount|paid|insured|net|gross|total|target|coll
 
 def _run(sql, params=()):
     with shared_engine().connect() as conn:
-        res = conn.exec_driver_sql(sql, tuple(params))
+        params = tuple(params)
+        res = (conn.exec_driver_sql(sql.replace("?", "%s"), params) if params
+               else conn.exec_driver_sql(sql))
         return pd.DataFrame([tuple(r) for r in res.fetchall()], columns=list(res.keys()))
 
 
@@ -48,7 +51,7 @@ def _escape_like(text):
 def table_columns():
     """{table: [(column, type), ...]} for every table in the Register database."""
     df = _run("SELECT TABLE_NAME AS t, COLUMN_NAME AS c, DATA_TYPE AS d FROM INFORMATION_SCHEMA.COLUMNS "
-              "WHERE TABLE_SCHEMA = 'dbo' ORDER BY TABLE_NAME, ORDINAL_POSITION")
+              "WHERE TABLE_SCHEMA = 'public' ORDER BY TABLE_NAME, ORDINAL_POSITION")
     return {t: list(zip(g["c"], g["d"].str.lower())) for t, g in df.groupby("t")}
 
 
@@ -85,9 +88,9 @@ def find_customers(text, sources):
     pattern = f"%{_escape_like(text.strip())}%"
     frames = []
     for table, col in sources:
-        key = f"UPPER(LTRIM(RTRIM(CAST([{col}] AS nvarchar(200)))))"
-        frames.append(_run(f"SELECT TOP 60 {key} AS name, COUNT(*) AS n FROM dbo.[{table}] "
-                           f"WHERE [{col}] LIKE ? ESCAPE '\\' GROUP BY {key} ORDER BY COUNT(*) DESC", (pattern,)))
+        key = f"UPPER(LTRIM(RTRIM(CAST({qi(col)} AS text))))"
+        frames.append(_run(f"SELECT {key} AS name, COUNT(*) AS n FROM {qi(table)} "
+                           f"WHERE CAST({qi(col)} AS text) LIKE ? ESCAPE '\\' GROUP BY {key} ORDER BY COUNT(*) DESC LIMIT 60", (pattern,)))
     df = pd.concat(frames, ignore_index=True)
     return df.groupby("name", as_index=False)["n"].sum().sort_values("n", ascending=False).head(60)
 
@@ -95,77 +98,77 @@ def find_customers(text, sources):
 @st.cache_data(ttl="10m", show_spinner=False)
 def distinct_values(table, column, limit=300):
     """The most common values of a column (for filter pick-lists)."""
-    key = f"UPPER(LTRIM(RTRIM(CAST([{column}] AS nvarchar(200)))))"
-    return _run(f"SELECT TOP {int(limit)} {key} AS value, COUNT(*) AS n FROM dbo.[{table}] "
-                f"WHERE [{column}] IS NOT NULL GROUP BY {key} ORDER BY COUNT(*) DESC")
+    key = f"UPPER(LTRIM(RTRIM(CAST({qi(column)} AS text))))"
+    return _run(f"SELECT {key} AS value, COUNT(*) AS n FROM {qi(table)} "
+                f"WHERE {qi(column)} IS NOT NULL GROUP BY {key} ORDER BY COUNT(*) DESC LIMIT {int(limit)}")
 
 
 @st.cache_data(ttl="30m", show_spinner=False)
 def cardinality(table, column):
     """How many different values a column has (decides between a pick-list and a search box)."""
-    key = f"UPPER(LTRIM(RTRIM(CAST([{column}] AS nvarchar(200)))))"
-    return int(_run(f"SELECT COUNT(DISTINCT {key}) AS n FROM dbo.[{table}] WHERE [{column}] IS NOT NULL")["n"].iloc[0])
+    key = f"UPPER(LTRIM(RTRIM(CAST({qi(column)} AS text))))"
+    return int(_run(f"SELECT COUNT(DISTINCT {key}) AS n FROM {qi(table)} WHERE {qi(column)} IS NOT NULL")["n"].iloc[0])
 
 
 @st.cache_data(ttl="10m", show_spinner=False)
 def find_values(table, column, text, limit=60):
     """Values of a column containing `text` (most common first), for columns with too many values to list."""
-    key = f"UPPER(LTRIM(RTRIM(CAST([{column}] AS nvarchar(200)))))"
-    return _run(f"SELECT TOP {int(limit)} {key} AS value, COUNT(*) AS n FROM dbo.[{table}] "
-                f"WHERE [{column}] LIKE ? ESCAPE '\\' GROUP BY {key} ORDER BY COUNT(*) DESC",
+    key = f"UPPER(LTRIM(RTRIM(CAST({qi(column)} AS text))))"
+    return _run(f"SELECT {key} AS value, COUNT(*) AS n FROM {qi(table)} "
+                f"WHERE CAST({qi(column)} AS text) LIKE ? ESCAPE '\\' GROUP BY {key} ORDER BY COUNT(*) DESC LIMIT {int(limit)}",
                 (f"%{_escape_like(text.strip())}%",))
 
 
 @st.cache_data(ttl="30m", show_spinner=False)
 def year_values(table, date_col):
     """The years that have data, with row counts."""
-    return _run(f"SELECT YEAR([{date_col}]) AS value, COUNT(*) AS n FROM dbo.[{table}] "
-                f"WHERE [{date_col}] IS NOT NULL GROUP BY YEAR([{date_col}]) ORDER BY 1")
+    return _run(f"SELECT EXTRACT(YEAR FROM {qi(date_col)})::int AS value, COUNT(*) AS n FROM {qi(table)} "
+                f"WHERE {qi(date_col)} IS NOT NULL GROUP BY EXTRACT(YEAR FROM {qi(date_col)})::int ORDER BY 1")
 
 
 # ------------------------------------------------------------------ building the SQL
-_MONTH_SQL = "CHOOSE(MONTH([{d}]), " + ", ".join(f"N'{m}'" for m in MONTHS) + ")"
+_MONTH_SQL = "(ARRAY[" + ", ".join(f"'{m}'" for m in MONTHS) + "])[EXTRACT(MONTH FROM {d})::int]"
 
 
 def _part_sql(field, date_col):
     """One field as text that is never NULL (used when several fields are combined into one label)."""
     kind, col = field
     if kind == "year":
-        return f"ISNULL(CAST(YEAR([{date_col}]) AS nvarchar(10)), N'{BLANK}')"
+        return f"COALESCE(EXTRACT(YEAR FROM {qi(date_col)})::int::text, '{BLANK}')"
     if kind == "month":
-        return f"ISNULL({_MONTH_SQL.format(d=date_col)}, N'{BLANK}')"
-    return f"ISNULL(NULLIF(LTRIM(RTRIM(CAST([{col}] AS nvarchar(200)))), N''), N'{BLANK}')"
+        return f"COALESCE({_MONTH_SQL.format(d=qi(date_col))}, '{BLANK}')"
+    return f"COALESCE(NULLIF(BTRIM(CAST({qi(col)} AS text)), ''), '{BLANK}')"
 
 
 def _expr(field, date_col):
     kind, col = field
     if kind == "combo":                                # several fields ticked: "GHI | B"
-        return " + N' | ' + ".join(_part_sql(f, date_col) for f in col)
+        return " || ' | ' || ".join(_part_sql(f, date_col) for f in col)
     if kind == "all":                                  # no breakdown: one row for everything
         return "'All'"
     if kind == "year":
-        return f"YEAR([{date_col}])"
+        return f"EXTRACT(YEAR FROM {qi(date_col)})::int"
     if kind == "month":
-        return f"MONTH([{date_col}])"
-    return f"LTRIM(RTRIM(CAST([{col}] AS nvarchar(200))))"
+        return f"EXTRACT(MONTH FROM {qi(date_col)})::int"
+    return f"LTRIM(RTRIM(CAST({qi(col)} AS text)))"
 
 
 def _where(date_col, date_range, filters):
     conds, params = [], []
     if date_range and date_col:
-        conds.append(f"[{date_col}] >= ? AND [{date_col}] < DATEADD(day, 1, ?)")
+        conds.append(f"{qi(date_col)} >= ? AND {qi(date_col)} < (CAST(? AS date) + INTERVAL '1 day')")
         params += [date_range[0], date_range[1]]
     for kind, col, values in filters:
         if kind == "in" and values:
             marks = ",".join("?" * len(values))
-            conds.append(f"UPPER(LTRIM(RTRIM(CAST([{col}] AS nvarchar(200))))) IN ({marks})")
+            conds.append(f"UPPER(LTRIM(RTRIM(CAST({qi(col)} AS text)))) IN ({marks})")
             params += [str(v).strip().upper() for v in values]
         elif kind == "like" and values:
-            conds.append(f"[{col}] LIKE ? ESCAPE '\\'")
+            conds.append(f"CAST({qi(col)} AS text) LIKE ? ESCAPE '\\'")
             params.append(f"%{_escape_like(str(values))}%")
         elif kind in ("year", "month") and values and date_col:      # picked years / months of the date column
             marks = ",".join("?" * len(values))
-            conds.append(f"{kind.upper()}([{date_col}]) IN ({marks})")
+            conds.append(f"EXTRACT({kind.upper()} FROM {qi(date_col)})::int IN ({marks})")
             params += [int(v) for v in values]
     return ("WHERE " + " AND ".join(conds)) if conds else "", params
 
@@ -221,8 +224,8 @@ def aggregate(table, date_col, row_field, col_field, value_col, agg, date_range=
     where, params = _where(date_col, date_range, filters)
     rx = _expr(row_field, date_col)
     cx = _expr(col_field, date_col) if col_field else "'Total'"
-    vx = f"TRY_CAST([{value_col}] AS float)" if value_col else "1"
-    inner = f"(SELECT {rx} AS r, {cx} AS c, {vx} AS v FROM dbo.[{table}] {where}) x"
+    vx = f"try_float({qi(value_col)}::text)" if value_col else "1"
+    inner = f"(SELECT {rx} AS r, {cx} AS c, {vx} AS v FROM {qi(table)} {where}) x"
     fn = _AGG_SQL[agg]
 
     cells = _run(f"SELECT r, c, {fn} AS val FROM {inner} GROUP BY r, c", params)
@@ -263,9 +266,9 @@ def raw_rows(table, date_col, row_field, col_field, value_col, date_range=None, 
     where, params = _where(date_col, date_range, filters)
     rx = _expr(row_field, date_col)
     cx = _expr(col_field, date_col) if col_field else "'Total'"
-    vx = f"TRY_CAST([{value_col}] AS float)" if value_col else "1"
-    df = _run(f"SELECT TOP {int(limit) + 1} {rx} AS row_key, {cx} AS col_key, {vx} AS value "
-              f"FROM dbo.[{table}] {where}", params)
+    vx = f"try_float({qi(value_col)}::text)" if value_col else "1"
+    df = _run(f"SELECT {rx} AS row_key, {cx} AS col_key, {vx} AS value "
+              f"FROM {qi(table)} {where} LIMIT {int(limit) + 1}", params)
     truncated = len(df) > limit
     df = df.head(limit).copy()
     df["row_key"], df["col_key"] = _norm(df["row_key"], row_field), _norm(df["col_key"], col_field)

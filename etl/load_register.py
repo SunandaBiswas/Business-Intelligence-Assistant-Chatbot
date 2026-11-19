@@ -1,10 +1,10 @@
 """
-Load MIS register files (Excel / CSV) into the SQL Server database [Register].
+Load MIS register files (Excel / CSV) into the Supabase (PostgreSQL) database.
 
 Source  : <MIS - Documents>\\Power BI Datasets, Old Registers, CR_Merged_OLD_NEW_CIS
-Target  : SQL Server  localhost\\SQLEXPRESS  ->  database [Register]
+Target  : Supabase Postgres (SUPABASE_DB_URL in the .env file), schema public
 Layout  : one table per file (or per sheet when a workbook has several sheets)
-Catalog : dbo._catalog lists every table, its source file/sheet, row count and status
+Catalog : public._catalog lists every table, its source file/sheet, row count and status
 Log     : etl\\logs\\load_register_<timestamp>.log
 
 Re-running is safe: a file whose modified time hasn't changed since its last
@@ -22,8 +22,7 @@ import sys
 from pathlib import Path
 
 # ---------------------------------------------------------------- settings
-SERVER = r"localhost\SQLEXPRESS"
-DATABASE = "Register"
+MAX_IDENT = 63                    # PostgreSQL identifier limit
 MIS_ROOT = Path(os.path.expanduser(
     r"~\GDIC\OneDrive - Green Delta Insurance PLC\Shortcuts\MIS - Documents"))
 FOLDERS = {                       # folder -> table-name prefix
@@ -33,7 +32,7 @@ FOLDERS = {                       # folder -> table-name prefix
 }
 EXTENSIONS = {".xlsx", ".xlsm", ".xls", ".xlsb", ".csv"}
 CSV_CHUNK = 100_000
-SQL_CHUNK = 5_000
+SQL_CHUNK = 2_000
 
 HERE = Path(__file__).resolve().parent
 LOG_DIR = HERE / "logs"
@@ -51,8 +50,8 @@ log = logging.getLogger("register")
 
 
 # ---------------------------------------------------------------- packages
-REQUIRED = {"pandas": "pandas", "sqlalchemy": "sqlalchemy", "pyodbc": "pyodbc",
-            "python_calamine": "python-calamine"}
+REQUIRED = {"pandas": "pandas", "sqlalchemy": "sqlalchemy", "psycopg": "psycopg[binary]",
+            "python_calamine": "python-calamine", "dotenv": "python-dotenv"}
 
 
 def ensure_packages():
@@ -84,7 +83,7 @@ def clean_name(text, maxlen=60):
 def unique_columns(cols):
     seen, out = {}, []
     for i, c in enumerate(cols):
-        name = clean_name(c, 100) if str(c).strip() not in ("", "nan", "None") else f"col_{i+1}"
+        name = clean_name(c, MAX_IDENT) if str(c).strip() not in ("", "nan", "None") else f"col_{i+1}"
         base, n = name, 1
         while name.lower() in seen:
             n += 1
@@ -139,7 +138,7 @@ def tidy_frame(df):
 
 def sql_types(df):
     import pandas as pd
-    from sqlalchemy.types import NVARCHAR, Float, BigInteger, DateTime
+    from sqlalchemy.types import Float, BigInteger, DateTime, Text
     types = {}
     for c in df.columns:
         s = df[c]
@@ -150,76 +149,40 @@ def sql_types(df):
         elif pd.api.types.is_numeric_dtype(s):
             types[c] = Float()
         else:
-            ln = int(s.dropna().astype(str).str.len().max() or 1)
-            types[c] = NVARCHAR(None if ln > 4000 else max(50, min(4000, ln * 2)))
+            types[c] = Text()
     return types
 
 
 # ---------------------------------------------------------------- database
 def make_engines():
-    import pyodbc
-    from sqlalchemy import create_engine
-    from urllib.parse import quote_plus
-    drivers = [d for d in pyodbc.drivers()]
-    log.info("ODBC drivers on this PC: %s", drivers)
-    for pref in ("ODBC Driver 18 for SQL Server", "ODBC Driver 17 for SQL Server",
-                 "SQL Server Native Client 11.0", "SQL Server"):
-        if pref in drivers:
-            driver = pref
-            break
-    else:
-        raise SystemExit("No SQL Server ODBC driver found. Install 'ODBC Driver 18 for SQL Server'.")
-    log.info("Using driver: %s", driver)
-
-    def conn_str(db):
-        return (f"DRIVER={{{driver}}};SERVER={SERVER};DATABASE={db};"
-                "Trusted_Connection=yes;TrustServerCertificate=yes;Encrypt=no")
-
-    # create the database if needed (autocommit)
-    cn = pyodbc.connect(conn_str("master"), autocommit=True)
-    cn.execute(f"IF DB_ID(N'{DATABASE}') IS NULL CREATE DATABASE [{DATABASE}];")
-    cn.close()
-    log.info("Database [%s] is ready on %s", DATABASE, SERVER)
-
-    fast = driver.startswith("ODBC Driver")
-    eng = create_engine("mssql+pyodbc:///?odbc_connect=" + quote_plus(conn_str(DATABASE)),
-                        fast_executemany=fast)
-    with eng.begin() as c:
-        c.exec_driver_sql("""
-        IF OBJECT_ID('dbo._catalog') IS NULL
-        CREATE TABLE dbo._catalog (
-            table_name   NVARCHAR(128) NOT NULL PRIMARY KEY,
-            source_path  NVARCHAR(1000) NOT NULL,
-            sheet_name   NVARCHAR(200) NULL,
-            file_mtime   DATETIME2 NULL,
-            row_count    BIGINT NULL,
-            column_count INT NULL,
-            status       NVARCHAR(20) NOT NULL,
-            message      NVARCHAR(2000) NULL,
-            loaded_at    DATETIME2 NOT NULL DEFAULT SYSDATETIME()
-        );""")
+    sys.path.insert(0, str(HERE.parent))
+    from db_connector import ensure_setup, get_engine
+    eng = get_engine()
+    ensure_setup(eng)                  # try_float()/try_int() helpers + public._catalog
+    with eng.connect() as c:
+        log.info("Connected to Supabase database '%s'", c.exec_driver_sql("SELECT current_database()").scalar())
     return eng
 
 
 def record(eng, table, path, sheet, mtime, rows, cols, status, msg=None):
     with eng.begin() as c:
-        c.exec_driver_sql("DELETE FROM dbo._catalog WHERE table_name = ?", (table,))
+        c.exec_driver_sql("DELETE FROM public._catalog WHERE table_name = %s", (table,))
         c.exec_driver_sql(
-            "INSERT INTO dbo._catalog (table_name, source_path, sheet_name, file_mtime, row_count,"
-            " column_count, status, message) VALUES (?,?,?,?,?,?,?,?)",
+            "INSERT INTO public._catalog (table_name, source_path, sheet_name, file_mtime, row_count,"
+            " column_count, status, message) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
             (table, str(path), sheet, mtime, rows, cols, status, (msg or "")[:2000]))
 
 
 def already_loaded(eng, path, mtime):
     with eng.connect() as c:
         r = c.exec_driver_sql(
-            "SELECT COUNT(*) FROM dbo._catalog WHERE source_path = ? AND file_mtime = ? AND status = 'ok'",
+            "SELECT COUNT(*) FROM public._catalog WHERE source_path = %s AND file_mtime = %s AND status = 'ok'",
             (str(path), mtime)).scalar()
     return r > 0
 
 
 def write_frame(eng, df, table, first=True):
-    df.to_sql(table, eng, schema="dbo", if_exists="replace" if first else "append",
+    df.to_sql(table, eng, schema="public", if_exists="replace" if first else "append",
               index=False, chunksize=SQL_CHUNK, dtype=sql_types(df) if first else None)
 
 
@@ -233,7 +196,7 @@ def load_excel(eng, path, prefix, mtime):
     results = []
     for s in sheets:
         table = base if len(sheets) == 1 else f"{base}__{clean_name(s, 40)}"
-        table = table[:128]
+        table = table[:MAX_IDENT]
         try:
             rows = wb.get_sheet_by_name(s).to_python(skip_empty_area=False)
             if not rows or len(rows) < 2:
@@ -260,7 +223,7 @@ def load_excel(eng, path, prefix, mtime):
 
 def load_csv(eng, path, prefix, mtime):
     import pandas as pd
-    table = f"{prefix}_{clean_name(path.stem)}"[:128]
+    table = f"{prefix}_{clean_name(path.stem)}"[:MAX_IDENT]
     enc = "utf-8-sig"
     try:
         pd.read_csv(path, nrows=5, encoding=enc)
@@ -286,7 +249,7 @@ def load_csv(eng, path, prefix, mtime):
                 dates[c] = False
     newcols = unique_columns(cols)
     rename = dict(zip(cols, newcols))
-    from sqlalchemy.types import NVARCHAR, Float, DateTime
+    from sqlalchemy.types import Float, DateTime, Text
     dtype = {}
     for c in cols:
         n = rename[c]
@@ -295,7 +258,7 @@ def load_csv(eng, path, prefix, mtime):
         elif dates[c]:
             dtype[n] = DateTime()
         else:
-            dtype[n] = NVARCHAR(None if maxlen[c] > 4000 else max(50, min(4000, maxlen[c] * 2)))
+            dtype[n] = Text()
     # pass 2: load
     total, first = 0, True
     try:
@@ -308,7 +271,7 @@ def load_csv(eng, path, prefix, mtime):
                     chunk[n] = pd.to_numeric(chunk[n].str.replace(",", "", regex=False), errors="coerce")
                 elif dates[c]:
                     chunk[n] = pd.to_datetime(chunk[n], errors="coerce", format="mixed")
-            chunk.to_sql(table, eng, schema="dbo", if_exists="replace" if first else "append",
+            chunk.to_sql(table, eng, schema="public", if_exists="replace" if first else "append",
                          index=False, chunksize=SQL_CHUNK, dtype=dtype if first else None)
             first = False
             total += len(chunk)
@@ -356,7 +319,7 @@ def main():
                     errors += 1
                     log.error("   could not read %s: %r", path.name, e)
         with eng.connect() as c:
-            bad = c.exec_driver_sql("SELECT COUNT(*) FROM dbo._catalog WHERE status='error'").scalar()
+            bad = c.exec_driver_sql("SELECT COUNT(*) FROM public._catalog WHERE status='error'").scalar()
         status = f"DONE  tables_loaded={loaded}  files_unchanged={skipped}  file_errors={errors}  catalog_errors={bad}"
         log.info(status)
     except SystemExit as e:

@@ -1,0 +1,59 @@
+python-dotenv
+
+# framework / technology for ai agents
+langchain 
+langchain-core 
+langchain-community
+
+
+## LLM PROVIDER 
+
+langchain-groq
+langchain-text-splitters
+
+
+# vector store
+
+langchain-qdrant
+qdrant-client
+
+
+# Groq SDK (used directly by sql_agent.py)
+groq
+
+# database (SQL Server: db_connector.py, etl/, sql_agent.py)
+
+pandas
+sqlalchemy
+psycopg[binary]
+pyodbc  # only needed by etl/migrate_sqlserver_to_supabase.py
+python-calamine
+openpyxl
+
+
+# notebook
+jupyter
+ipykernel
+
+
+# web app 
+
+streamlit
+
+# LLM gateways
+
+portkey-ai
+langchain-openai
+
+## every gateway  -- gives you an openai compatible code 
+
+
+# evaluations 
+
+openevals
+
+# tests (CI smoke test before evaluation/build/deploy)
+pytest
+
+# Google sign-in (st.login)
+Authlib

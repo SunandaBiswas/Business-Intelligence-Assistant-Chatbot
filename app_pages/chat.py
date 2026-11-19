@@ -39,6 +39,14 @@ with st.bottom:
     bar, clear_col = st.columns([8, 1.5], vertical_alignment="center")
     with bar:
         question = st.chat_input("Ask about collections, renewals, claims, targets...")
+    st.html("""<style>
+      /* chat box and Clear chat button share one height */
+      [data-testid="stChatInput"] { min-height: 3rem; }
+      .st-key-chat_clear button { height: 3rem; min-height: 3rem; }
+      .st-key-chat_clear button { color: #B3261E; border-color: #E4A8A4; background: #FDF1F0; }
+      .st-key-chat_clear button:hover { color: #FFFFFF; background: #C62828; border-color: #C62828; }
+      .st-key-chat_clear button:hover * { color: #FFFFFF; }
+    </style>""")
     if clear_col.button("Clear chat", icon=":material/delete:", width="stretch", key="chat_clear"):
         st.session_state.messages = []
         st.rerun()

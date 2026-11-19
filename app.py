@@ -10,28 +10,51 @@ Run:  streamlit run app.py
 import streamlit as st
 
 import sql_agent
-from auth import render_auth_bar
+from auth import account_status, current_user, has_access, is_admin, render_auth_bar
 from common import check_database
 
-st.set_page_config(page_title="BI ASSISTANT BOT - Green Delta", page_icon="assets/gdic_icon.png",
+st.set_page_config(page_title="BUSINESS INTELLIGENCE ASSISTANT BOT - Green Delta", page_icon="assets/gdic_icon.png",
                    layout="wide")
-pages = [
-        st.Page("app_pages/chat.py", title="Chat", icon=":material/chat:", url_path="chat",
-                help="Ask questions about the MIS registers in plain English, or paste a SQL query. "
-                     "Download any result as an Excel report."),
-        st.Page("app_pages/glance.py", title="At a glance", icon=":material/dashboard:",
-                url_path="glance",
-                help="Summary tiles for every register: rows, date coverage, headline totals and "
-                     "when each file was last updated. Use Ask to question a register."),
-        st.Page("app_pages/summary.py", title="Summary", icon=":material/bar_chart:",
-                url_path="summary",
-                help="Year-wise, class-wise and customer-wise premium, compared across the "
-                     "registers you select, with stacked bar charts."),
-        st.Page("app_pages/excel_reports.py", title="Excel reports", icon=":material/table_view:",
-                url_path="excel",
-                help="Department reports in your standard Excel format, and a pivot generator "
-                     "that delivers plain values or live formulas."),
-    ]
+logged_in = has_access()                  # logged in AND approved by the administrator
+
+
+def locked_page():
+    """What a visitor who is not logged in sees on the private pages (log in with the sidebar buttons)."""
+    status = account_status() if current_user() else None
+    if status == "pending":
+        st.info("Your account is waiting for the administrator's approval. "
+                "You'll be able to open this page as soon as it is approved.", icon=":material/hourglass_top:")
+    elif status == "blocked":
+        st.error("This account has been blocked. Please contact the administrator.", icon=":material/block:")
+    else:
+        st.info("This page is private. Use **Log in** or **Sign up** in the sidebar to see it.",
+                icon=":material/lock:")
+
+
+# (file, title, icon, url, help) - Chat is public; the other pages need a login
+PRIVATE = [
+    ("app_pages/glance.py", "At a glance", ":material/dashboard:", "glance",
+     "Summary tiles for every register: rows, date coverage, headline totals and when each file was "
+     "last updated. Use Ask to question a register."),
+    ("app_pages/summary.py", "Summary", ":material/bar_chart:", "summary",
+     "Year-wise, class-wise and customer-wise premium, compared across the registers you select, "
+     "with stacked bar charts."),
+    ("app_pages/excel_reports.py", "Excel reports", ":material/table_view:", "excel",
+     "Department reports in your standard Excel format, and a pivot generator that delivers plain "
+     "values or live formulas."),
+]
+pages = [st.Page("app_pages/chat.py", title="Chat", icon=":material/chat:", url_path="chat", default=True,
+                 help="Ask questions about the MIS registers in plain English, or paste a SQL query. "
+                      "Download any result as an Excel report.")]
+for path, title, icon, url, hint in PRIVATE:
+    if logged_in:
+        pages.append(st.Page(path, title=title, icon=icon, url_path=url, help=hint))
+    else:                                              # visible in the menu, but locked
+        pages.append(st.Page(locked_page, title=title, icon=":material/lock:", url_path=url,
+                             help="Log in to open this page."))
+if is_admin():                                       # the Admin page only exists in the menu for the administrator
+    pages.append(st.Page("app_pages/admin.py", title="Admin", icon=":material/admin_panel_settings:",
+                         url_path="admin", help="Manage accounts, check the data and system status."))
 page = st.navigation(pages, position="top")
 
 with st.sidebar:
@@ -39,14 +62,14 @@ with st.sidebar:
     with st.container(key="brand"):
         with st.container(horizontal=True, horizontal_alignment="center"):
             st.image("assets/gdic_logo.png", width=232, alt="Green Delta Insurance logo")
-        render_auth_bar()
-        st.subheader("BI ASSISTANT BOT", text_alignment="center")
+        st.subheader("BUSINESS INTELLIGENCE ASSISTANT BOT", text_alignment="center")
         ok, msg = check_database()
         if ok:
             st.markdown(f":material/check_circle: {msg}", text_alignment="center")
         else:
             st.error(msg)
         st.caption(f"Model: {sql_agent.MODEL}", text_alignment="center")
+        render_auth_bar()                      # Log in / Sign up sit at the bottom of the block
     # Streamlit can't centre sidebar content vertically on its own (the sidebar has no fixed height),
     # so push just this block down by half the window height minus half the block's own height.
     st.html("<style>.st-key-brand { margin-top: calc(50vh - 215px); }</style>")

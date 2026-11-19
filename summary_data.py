@@ -26,6 +26,7 @@ import streamlit as st
 
 import glance_data as gd
 from common import shared_engine
+from db_connector import qi
 
 _CLASS_RE = re.compile(r"^class(_?code)?(_ms)?$|^class_code", re.I)
 _CUSTOMER_RE = re.compile(r"customer|insured_?name|^name$", re.I)
@@ -39,20 +40,22 @@ _KIND = {"Month-wise": "month", "Weekly": "week"}
 
 def _q(sql, params=()):
     with shared_engine().connect() as conn:
-        res = conn.exec_driver_sql(sql, tuple(params))
+        params = tuple(params)
+        res = (conn.exec_driver_sql(sql.replace("?", "%s"), params) if params
+               else conn.exec_driver_sql(sql))
         return pd.DataFrame([tuple(r) for r in res.fetchall()], columns=list(res.keys()))
 
 
 def _lit(d):
-    """A date as an unambiguous SQL literal (YYYYMMDD)."""
-    return "'" + d.strftime("%Y%m%d") + "'"
+    """A date as an unambiguous SQL literal."""
+    return "DATE '" + d.strftime("%Y-%m-%d") + "'"
 
 
 def _range_sql(date_col, start, end):
     """WHERE condition for an inclusive date range; with no range, just drop junk dates."""
     if start is None or end is None:
-        return f"[{date_col}] {_DATE_OK}"
-    return f"[{date_col}] >= {_lit(start)} AND [{date_col}] < DATEADD(day, 1, {_lit(end)})"
+        return f"{qi(date_col)} {_DATE_OK}"
+    return f"{qi(date_col)} >= {_lit(start)} AND {qi(date_col)} < ({_lit(end)} + INTERVAL '1 day')"
 
 
 def _flt_sql(flt):
@@ -60,7 +63,7 @@ def _flt_sql(flt):
     conds, params = [], []
     for _, col, values in flt:
         marks = ",".join("?" * len(values))
-        conds.append(f"UPPER(LTRIM(RTRIM(CAST([{col}] AS nvarchar(200))))) IN ({marks})")
+        conds.append(f"UPPER(LTRIM(RTRIM(CAST({qi(col)} AS text)))) IN ({marks})")
         params += [str(v).strip().upper() for v in values]
     return conds, params
 
@@ -76,7 +79,7 @@ def sources():
     amount column is included (premium, amount paid, target, ...); `measure` says what the amount is."""
     regs = gd.registers()
     cols = _q("SELECT TABLE_NAME AS t, COLUMN_NAME AS c, DATA_TYPE AS d FROM INFORMATION_SCHEMA.COLUMNS "
-              "WHERE TABLE_SCHEMA = 'dbo' ORDER BY TABLE_NAME, ORDINAL_POSITION")
+              "WHERE TABLE_SCHEMA = 'public' ORDER BY TABLE_NAME, ORDINAL_POSITION")
     colmap = {t: list(zip(g["c"], g["d"].str.lower())) for t, g in cols.groupby("t")}
     plain = {"premium", "netpremium", "creditnet", "amountpaid", "target", "collection", "total"}
     year_re = re.compile(r"^year(_\d+)?$", re.I)
@@ -112,8 +115,11 @@ def sources():
 @st.cache_data(ttl="1h", show_spinner=False)
 def class_names():
     """{'MAR': 'Marine', ...} from the Name lookup sheet."""
-    df = _q("SELECT Class_Code, MAX(LTRIM(RTRIM(Class_Name))) AS Class_Name "
-            "FROM dbo.PBI_Name__Class GROUP BY Class_Code")
+    try:
+        df = _q("SELECT \"Class_Code\", MAX(BTRIM(\"Class_Name\"::text)) AS \"Class_Name\" "
+                "FROM \"PBI_Name__Class\" GROUP BY \"Class_Code\"")
+    except Exception:                                    # no class-name lookup table in this database
+        return {}
     return {str(c).strip().upper(): n for c, n in zip(df["Class_Code"], df["Class_Name"]) if n}
 
 
@@ -125,21 +131,21 @@ def _none(v):
 def _amount(col):
     """The amount to add up. A register with no amount column counts its records instead (1 per row)."""
     col = _none(col)
-    return "1" if col is None else f"TRY_CAST([{col}] AS float)"
+    return "1" if col is None else f"try_float({qi(col)}::text)"
 
 
 @st.cache_data(ttl="30m", show_spinner=False)
 def by_year(table, date_col, amount_col, start=None, end=None, flt=(), year_col=None):
     date_col, year_col = _none(date_col), _none(year_col)
     if date_col is None:                                 # no dates: use the register's own Year column
-        year = f"TRY_CAST([{year_col}] AS int)"
+        year = f"try_int({qi(year_col)}::text)"
         where, params = _where(f"{year} IS NOT NULL", flt)
         df = _q(f"SELECT {year} AS k, SUM({_amount(amount_col)}) AS premium "
-                f"FROM dbo.[{table}] WHERE {where} GROUP BY {year}", params)
+                f"FROM {qi(table)} WHERE {where} GROUP BY {year}", params)
     else:
         where, params = _where(_range_sql(date_col, start, end), flt)
-        df = _q(f"SELECT YEAR([{date_col}]) AS k, SUM({_amount(amount_col)}) AS premium "
-                f"FROM dbo.[{table}] WHERE {where} GROUP BY YEAR([{date_col}])", params)
+        df = _q(f"SELECT EXTRACT(YEAR FROM {qi(date_col)})::int AS k, SUM({_amount(amount_col)}) AS premium "
+                f"FROM {qi(table)} WHERE {where} GROUP BY EXTRACT(YEAR FROM {qi(date_col)})::int", params)
     df["k"] = df["k"].astype(int).astype(str)
     return df
 
@@ -151,14 +157,14 @@ def by_period(table, date_col, amount_col, kind, year, month=None, flt=()):
     year = int(year)
     if kind == "month":
         start, end = f"{year}-01-01", f"{year + 1}-01-01"
-        key = f"MONTH([{date_col}])"
+        key = f"EXTRACT(MONTH FROM {qi(date_col)})::int"
     else:
         month = int(month)
         start = f"{year}-{month:02d}-01"
         end = f"{year + 1}-01-01" if month == 12 else f"{year}-{month + 1:02d}-01"
-        key = f"(DAY([{date_col}]) - 1) / 7 + 1"
-    where, params = _where(f"[{date_col}] >= '{start}' AND [{date_col}] < '{end}'", flt)
-    return _q(f"SELECT {key} AS k, SUM({_amount(amount_col)}) AS premium FROM dbo.[{table}] "
+        key = f"(EXTRACT(DAY FROM {qi(date_col)})::int - 1) / 7 + 1"
+    where, params = _where(f"{qi(date_col)} >= '{start}' AND {qi(date_col)} < '{end}'", flt)
+    return _q(f"SELECT {key} AS k, SUM({_amount(amount_col)}) AS premium FROM {qi(table)} "
               f"WHERE {where} GROUP BY {key}", params)
 
 
@@ -166,12 +172,12 @@ def by_period(table, date_col, amount_col, kind, year, month=None, flt=()):
 def by_bucket(table, date_col, amount_col, kind, start, end, flt=()):
     """Premium per calendar month / week-of-month inside start..end.
     Returns k = year*10000 + month*100 + bucket (bucket is 0 for months)."""
-    d = f"[{date_col}]"
-    bucket = {"month": None, "week": f"(DAY({d}) - 1) / 7 + 1"}[kind]
-    group = f"YEAR({d}), MONTH({d})" + (f", {bucket}" if bucket else "")
+    d = f"{qi(date_col)}"
+    bucket = {"month": None, "week": f"(EXTRACT(DAY FROM {d})::int - 1) / 7 + 1"}[kind]
+    group = f"EXTRACT(YEAR FROM {d})::int, EXTRACT(MONTH FROM {d})::int" + (f", {bucket}" if bucket else "")
     where, params = _where(_range_sql(date_col, start, end), flt)
-    df = _q(f"SELECT YEAR({d}) AS y, MONTH({d}) AS m, {bucket or '0'} AS b, "
-            f"SUM({_amount(amount_col)}) AS premium FROM dbo.[{table}] "
+    df = _q(f"SELECT EXTRACT(YEAR FROM {d})::int AS y, EXTRACT(MONTH FROM {d})::int AS m, {bucket or '0'} AS b, "
+            f"SUM({_amount(amount_col)}) AS premium FROM {qi(table)} "
             f"WHERE {where} GROUP BY {group}", params)
     df["k"] = df["y"].astype(int) * 10000 + df["m"].astype(int) * 100 + df["b"].astype(int)
     return df[["k", "premium"]]
@@ -179,12 +185,12 @@ def by_bucket(table, date_col, amount_col, kind, start, end, flt=()):
 
 @st.cache_data(ttl="30m", show_spinner=False)
 def by_class(table, class_col, amount_col, date_col=None, start=None, end=None, flt=()):
-    key = f"UPPER(LTRIM(RTRIM(CAST([{class_col}] AS nvarchar(100)))))"
-    first = f"[{class_col}] IS NOT NULL"
+    key = f"UPPER(LTRIM(RTRIM(CAST({qi(class_col)} AS text))))"
+    first = f"{qi(class_col)} IS NOT NULL"
     if start is not None and end is not None:
         first += f" AND {_range_sql(date_col, start, end)}"
     where, params = _where(first, flt)
-    df = _q(f"SELECT {key} AS k, SUM({_amount(amount_col)}) AS premium FROM dbo.[{table}] "
+    df = _q(f"SELECT {key} AS k, SUM({_amount(amount_col)}) AS premium FROM {qi(table)} "
             f"WHERE {where} GROUP BY {key}", params)
     names = class_names()
     df["k"] = df["k"].map(lambda c: f"{c} – {names[c]}" if c in names else c)
@@ -193,14 +199,14 @@ def by_class(table, class_col, amount_col, date_col=None, start=None, end=None, 
 
 @st.cache_data(ttl="30m", show_spinner=False)
 def by_customer(table, customer_col, amount_col, date_col=None, start=None, end=None, flt=()):
-    key = f"UPPER(LTRIM(RTRIM(CAST([{customer_col}] AS nvarchar(200)))))"
-    first = f"[{customer_col}] IS NOT NULL"
+    key = f"UPPER(LTRIM(RTRIM(CAST({qi(customer_col)} AS text))))"
+    first = f"{qi(customer_col)} IS NOT NULL"
     if start is not None and end is not None:
         first += f" AND {_range_sql(date_col, start, end)}"
     where, params = _where(first, flt)
-    return _q(f"SELECT TOP {TOP_CUSTOMER_ROWS} {key} AS k, SUM({_amount(amount_col)}) AS premium "
-              f"FROM dbo.[{table}] WHERE {where} "
-              f"GROUP BY {key} ORDER BY SUM({_amount(amount_col)}) DESC", params)
+    return _q(f"SELECT {key} AS k, SUM({_amount(amount_col)}) AS premium "
+              f"FROM {qi(table)} WHERE {where} "
+              f"GROUP BY {key} ORDER BY SUM({_amount(amount_col)}) DESC NULLS LAST LIMIT {TOP_CUSTOMER_ROWS}", params)
 
 
 # ------------------------------------------------------------------ filter pick-lists
@@ -210,9 +216,9 @@ def find_customers(text, sources_):
     pattern = "%" + re.sub(r"([\\%_\[])", r"\\\1", text.strip()) + "%"
     frames = []
     for table, col in sources_:
-        key = f"UPPER(LTRIM(RTRIM(CAST([{col}] AS nvarchar(200)))))"
-        frames.append(_q(f"SELECT TOP 60 {key} AS name, COUNT(*) AS n FROM dbo.[{table}] "
-                         f"WHERE [{col}] LIKE ? ESCAPE '\\' GROUP BY {key} ORDER BY COUNT(*) DESC", (pattern,)))
+        key = f"UPPER(LTRIM(RTRIM(CAST({qi(col)} AS text))))"
+        frames.append(_q(f"SELECT {key} AS name, COUNT(*) AS n FROM {qi(table)} "
+                         f"WHERE CAST({qi(col)} AS text) LIKE ? ESCAPE '\\' GROUP BY {key} ORDER BY COUNT(*) DESC LIMIT 60", (pattern,)))
     df = pd.concat(frames, ignore_index=True)
     return df.groupby("name", as_index=False)["n"].sum().sort_values("n", ascending=False).head(60)
 

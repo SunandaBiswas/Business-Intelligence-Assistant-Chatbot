@@ -1,58 +1,10 @@
-python-dotenv
-
-# framework / technology for ai agents
-langchain 
-langchain-core 
-langchain-community
-
-
-## LLM PROVIDER 
-
-langchain-groq
-langchain-text-splitters
-
-
-# vector store
-
-langchain-qdrant
-qdrant-client
-
-
-# Groq SDK (used directly by sql_agent.py)
-groq
-
-# database (SQL Server: db_connector.py, etl/, sql_agent.py)
-
+# What the hosted app needs (Streamlit Community Cloud installs this file).
+# The full list for notebooks / experiments is in requirements-full.txt.
+streamlit>=1.50
 pandas
-sqlalchemy
-pyodbc
-python-calamine
+sqlalchemy>=2.0
+psycopg[binary]>=3.2
+python-dotenv
+groq
 openpyxl
-
-
-# notebook
-jupyter
-ipykernel
-
-
-# web app 
-
-streamlit
-
-# LLM gateways
-
-portkey-ai
-langchain-openai
-
-## every gateway  -- gives you an openai compatible code 
-
-
-# evaluations 
-
-openevals
-
-# tests (CI smoke test before evaluation/build/deploy)
-pytest
-
-# Google sign-in (st.login)
-Authlib
+Authlib          # Google sign-in (st.login)

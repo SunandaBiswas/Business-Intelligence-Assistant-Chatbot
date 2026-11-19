@@ -18,7 +18,7 @@ import re
 import pandas as pd
 from dotenv import load_dotenv
 
-from db_connector import get_engine
+from db_connector import get_engine, qi
 
 load_dotenv()
 
@@ -58,7 +58,7 @@ def list_tables(engine=None):
     engine = engine or get_engine()
     with engine.connect() as conn:
         rows = conn.exec_driver_sql(
-            "SELECT table_name, row_count FROM dbo._catalog WHERE status = 'ok'").fetchall()
+            "SELECT table_name, row_count FROM public._catalog WHERE status = 'ok'").fetchall()
     return {r[0]: (r[1] or 0) for r in rows if r[0] not in HIDDEN_TABLES}
 
 
@@ -72,14 +72,15 @@ def table_schema(tables, engine=None, sample_rows=3):
             if t not in known:          # never interpolate an unknown name into SQL
                 continue
             cols = conn.exec_driver_sql(
-                "SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS "
-                "WHERE TABLE_SCHEMA='dbo' AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION",
+                "SELECT column_name, data_type FROM information_schema.columns "
+                "WHERE table_schema = 'public' AND table_name = %s ORDER BY ordinal_position",
                 (t,)).fetchall()
-            sample = pd.read_sql(f"SELECT TOP {sample_rows} * FROM [dbo].[{t}]", conn)
+            res = conn.exec_driver_sql(f"SELECT * FROM {qi(t)} LIMIT {int(sample_rows)}")
+            sample = pd.DataFrame([tuple(r) for r in res.fetchall()], columns=list(res.keys()))
             sample = sample.map(lambda v: str(v)[:40])
             parts.append(
-                f"TABLE dbo.[{t}]\n"
-                f"  columns: " + ", ".join(f"[{c}] {d}" for c, d in cols) + "\n"
+                f"TABLE {qi(t)}\n"
+                f"  columns: " + ", ".join(f"{qi(c)} {d}" for c, d in cols) + "\n"
                 f"  sample rows:\n" + sample.to_csv(index=False))
     return "\n".join(parts)
 
@@ -93,7 +94,7 @@ def pick_tables(question, history_text="", allowed=None):
     listing = "\n".join(f"- {name} ({rows:,} rows)" for name, rows in sorted(tables.items()))
     answer = _chat(
         "You route questions about an insurance company's MIS registers (collections, renewals, "
-        "claims, targets, branch/class names) stored in SQL Server. Given the table list, reply with "
+        "claims, targets, branch/class names) stored in a PostgreSQL (Supabase) database. Given the table list, reply with "
         f"ONLY the names of the 1 to {MAX_TABLES} most relevant tables, one per line, exactly as "
         "written. Prefer the most recent / most complete table for a topic. If the message is not a "
         "question about this data (greeting, thanks, general chat), reply with exactly: NONE",
@@ -107,16 +108,18 @@ def pick_tables(question, history_text="", allowed=None):
 
 
 # ------------------------------------------------------------------ step 3: SQL
-SQL_RULES = """You write ONE Microsoft SQL Server (T-SQL) query that answers the question.
+SQL_RULES = """You write ONE PostgreSQL query that answers the question.
 Rules:
 - Output ONLY the SQL, no explanation, no markdown fences.
-- Use only the tables and columns shown. Quote identifiers like dbo.[Table] and [Column].
-- T-SQL syntax: use TOP n (never LIMIT), YEAR()/MONTH(), FORMAT(), GETDATE().
-- Many numeric fields (e.g. Premium, SumInsured, AmountPaid) are stored as nvarchar: wrap them with
-  TRY_CAST([Col] AS float) before summing, averaging or comparing.
-- Dates are datetime columns; filter them with ranges or YEAR()/MONTH().
+- Use only the tables and columns shown. ALWAYS double-quote table and column names exactly as shown,
+  e.g. SELECT "Class_Code" FROM "PBI_Collection_Register" (they are case-sensitive).
+- PostgreSQL syntax: use LIMIT n (never TOP), EXTRACT(YEAR FROM "Col")::int, EXTRACT(MONTH FROM "Col")::int,
+  TO_CHAR("Col", 'YYYY-MM'), CURRENT_DATE, ILIKE for case-insensitive text matching.
+- Many numeric fields (e.g. Premium, SumInsured, AmountPaid) are stored as text: wrap them with
+  try_float("Col"::text) (a safe cast that returns NULL for bad values) before summing, averaging or comparing.
+- Dates are timestamp columns; filter them with ranges ("Col" >= DATE '2024-01-01' AND "Col" < DATE '2025-01-01').
 - Prefer aggregated answers (SUM/COUNT/GROUP BY, ORDER BY ... DESC) over dumping raw rows; if you do
-  return raw rows, use SELECT TOP 100.
+  return raw rows, add LIMIT 100.
 - A single read-only SELECT (CTEs allowed). Never modify data."""
 
 
@@ -135,9 +138,9 @@ def generate_sql(question, schema, history_text="", error=None, previous_sql=Non
 
 # ------------------------------------------------------------------ step 4: safety
 _FORBIDDEN = re.compile(
-    r"\b(insert|update|delete|drop|alter|create|truncate|merge|exec|execute|grant|revoke|deny|"
-    r"backup|restore|shutdown|openrowset|openquery|opendatasource|bulk|into|use|waitfor|dbcc|"
-    r"xp_\w+|sp_\w+)\b", re.I)
+    r"\b(insert|update|delete|drop|alter|create|truncate|merge|exec|execute|grant|revoke|copy|call|do|"
+    r"set|reset|vacuum|analyze|reindex|cluster|refresh|notify|listen|lock|into|dblink|"
+    r"pg_\w+|lo_\w+)\b", re.I)
 
 
 def validate_sql(sql):
@@ -152,6 +155,7 @@ def validate_sql(sql):
         raise ValueError("Only SELECT queries are allowed.")
     # ignore text inside quotes when looking for forbidden keywords
     unquoted = re.sub(r"'(?:[^']|'')*'", "''", cleaned)
+    unquoted = re.sub(r'"(?:[^"]|"")*"', '""', unquoted)        # and inside "quoted identifiers"
     bad = _FORBIDDEN.search(unquoted)
     if bad:
         raise ValueError(f"Keyword not allowed: {bad.group(0)}")
@@ -164,11 +168,10 @@ def run_query(sql, engine=None):
     engine = engine or get_engine()
     sql = validate_sql(sql)
     with engine.connect() as conn:
-        try:
-            conn.connection.dbapi_connection.timeout = QUERY_TIMEOUT
-        except Exception:
-            pass
-        result = conn.exec_driver_sql(sql)
+        conn.exec_driver_sql("SET TRANSACTION READ ONLY")           # the database itself refuses writes
+        conn.exec_driver_sql(f"SET LOCAL statement_timeout = {QUERY_TIMEOUT * 1000}")
+        # no_parameters: the SQL may hold a literal % (LIKE '%abc%') that must not be read as a placeholder
+        result = conn.execution_options(no_parameters=True).exec_driver_sql(sql)
         rows = result.fetchmany(MAX_ROWS + 1)
         df = pd.DataFrame([tuple(r) for r in rows], columns=list(result.keys()))
         conn.rollback()
@@ -183,7 +186,7 @@ def summarize(question, sql, df, truncated):
     else:
         data_text = df.head(30).to_csv(index=False)[:6000]
     return _chat(
-        "You are the BI Assistant Bot, a business-intelligence assistant for MIS data. Answer the question clearly and briefly using ONLY the query "
+        "You are the Business Intelligence Assistant Bot, a business-intelligence assistant for MIS data. Answer the question clearly and briefly using ONLY the query "
         "result. Give the key numbers (format large numbers with thousands separators). Do not invent "
         "figures. If the result is empty, say no matching data was found. Mention if results were cut off. "
         "The app shows a 'Download Excel' button under your answer, so never say you cannot create "

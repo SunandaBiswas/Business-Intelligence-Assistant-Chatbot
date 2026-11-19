@@ -1,6 +1,6 @@
 """
 Data layer for the "At a glance" page: one summary per register (source file) loaded
-into the Register database, read from dbo._catalog plus a few light aggregate queries.
+into the Register database, read from public._catalog plus a few light aggregate queries.
 
 Per register it returns: rows, sheets/tables, columns, date coverage, a headline total
 (premium / amount paid / target ...), when the source file changed and when it was loaded.
@@ -13,13 +13,14 @@ import pandas as pd
 import streamlit as st
 
 from common import shared_engine
+from db_connector import qi
 
 CATEGORY_ORDER = ["Collection", "Renewal", "Claims", "Targets & campaigns",
                   "Bancassurance", "Reference lists", "Other"]
 
-_DATE_TYPES = {"date", "datetime", "datetime2", "smalldatetime"}
-_NUM_TYPES = {"float", "real", "decimal", "numeric", "int", "bigint", "smallint", "money"}
-_TEXT_TYPES = {"nvarchar", "varchar"}
+_DATE_TYPES = {"date", "timestamp without time zone", "timestamp with time zone"}
+_NUM_TYPES = {"double precision", "real", "numeric", "integer", "bigint", "smallint"}
+_TEXT_TYPES = {"text", "character varying"}
 
 # (label shown on the tile, regex on the lower-cased column name) - first match wins
 _AMOUNT_RULES = [
@@ -101,22 +102,23 @@ def _profile(engine, table, cols):
         return out
     parts, names = [], []
     if date_col:
-        ok = f"[d] BETWEEN '2000-01-01' AND '2100-01-01'"   # ignore junk dates like 1900-01-01
-        parts += [f"MIN(CASE WHEN {ok} THEN [d] END)", f"MAX(CASE WHEN {ok} THEN [d] END)"]
+        ok = f"d BETWEEN '2000-01-01' AND '2100-01-01'"   # ignore junk dates like 1900-01-01
+        parts += [f"MIN(CASE WHEN {ok} THEN d END)", f"MAX(CASE WHEN {ok} THEN d END)"]
         names += ["date_min", "date_max"]
     if amt_col:
-        parts.append("SUM([v])")
+        parts.append("SUM(v)")
         names.append("amount_sum")
     inner = []
     if date_col:
-        inner.append(f"[{date_col}] AS [d]")
+        inner.append(f"{qi(date_col)} AS d")
     if amt_col:
-        inner.append(f"TRY_CAST([{amt_col}] AS float) AS [v]")
-    sql = f"SELECT {', '.join(parts)} FROM (SELECT {', '.join(inner)} FROM dbo.[{table}]) x"
+        inner.append(f"try_float({qi(amt_col)}::text) AS v")
+    sql = f"SELECT {', '.join(parts)} FROM (SELECT {', '.join(inner)} FROM {qi(table)}) x"
     try:
         row = _query(engine, sql).iloc[0]
         for i, n in enumerate(names):
-            out[n] = row.iloc[i]
+            v = row.iloc[i]
+            out[n] = pd.Timestamp(v) if n in ("date_min", "date_max") and pd.notna(v) else v
         out.update(date_col=date_col, amount_label=label, amount_col=amt_col)
     except Exception:  # noqa: BLE001 - a bad table must not break the whole page
         pass
@@ -129,9 +131,9 @@ def registers():
     """One row per register (source file), with profile columns. Cached for 30 minutes."""
     engine = shared_engine()
     cat = _query(engine, "SELECT table_name, source_path, sheet_name, file_mtime, row_count, "
-                         "column_count, loaded_at FROM dbo._catalog WHERE status = 'ok'")
+                         "column_count, loaded_at FROM public._catalog WHERE status = 'ok'")
     cols = _query(engine, "SELECT TABLE_NAME AS t, COLUMN_NAME AS c, DATA_TYPE AS d "
-                          "FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = 'dbo' "
+                          "FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = 'public' "
                           "ORDER BY TABLE_NAME, ORDINAL_POSITION")
     colmap = {t: list(zip(g["c"], g["d"].str.lower())) for t, g in cols.groupby("t")}
 
@@ -169,6 +171,6 @@ def catalog_table():
     """Every loaded table (sheet) with its source file - for the detail table."""
     df = _query(shared_engine(),
                 "SELECT table_name, source_path, sheet_name, row_count, column_count, "
-                "file_mtime, loaded_at FROM dbo._catalog WHERE status = 'ok' ORDER BY table_name")
+                "file_mtime, loaded_at FROM public._catalog WHERE status = 'ok' ORDER BY table_name")
     df["file"] = df["source_path"].map(os.path.basename)
     return df.drop(columns="source_path")

@@ -1,0 +1,4 @@
+# Only for loading data from Excel / SQL Server into Supabase (etl/*.py) - not needed to run the app.
+-r requirements.txt
+python-calamine
+pyodbc           # etl/migrate_sqlserver_to_supabase.py only
