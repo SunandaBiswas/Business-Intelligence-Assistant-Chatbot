@@ -1,7 +1,11 @@
 # Business Intelligence Assistant Chatbot
 
-A Streamlit web app that lets people at **Green Delta Insurance (GDIC)** ask questions about their MIS
-registers (collection, renewal, claims, targets, bancassurance, employee lists …) **in plain English**,
+**🔗 Live app (public view): [https://hr-assistant-xomvicwp3juegurfnepflk.streamlit.app/](https://hr-assistant-xomvicwp3juegurfnepflk.streamlit.app/)**
+
+The *Chat* page is open to everyone; the other pages need an account approved by the administrator.
+
+A Streamlit web application that lets people at **Green Delta Insurance (GDIC)** ask questions about their MIS
+registers (collection, renewal, claims, targets, bancassurance, employee lists …),
 and get back an answer, the SQL that produced it, the data, and a ready-to-download **Excel report**.
 
 > Instead of asking an analyst to write a query or build a pivot table, you type
@@ -54,7 +58,37 @@ Other highlights:
 
 ---
 
-## 3. How a question is answered (architecture)
+## 3. The platforms behind the app – Groq, Streamlit, Supabase and GitHub
+
+Four services work together. Each has one clear job:
+
+| Service | What it is | Its role in this project |
+|---------|-----------|--------------------------|
+| **Groq** | A cloud platform that runs large language models (LLMs) at very high speed through an API. | The **"brain"**. `sql_agent.py` sends it the user's question plus the table schemas, and it (1) picks the right tables, (2) writes the SQL query, (3) rewrites the query if it fails, and (4) explains the result in plain English. Groq never sees the whole database, only the question, column names and a few sample rows. Needs `GROQ_API_KEY`. |
+| **Streamlit** | A Python framework that turns scripts into interactive web apps without HTML/JS. | The **"face"**. It renders every page (Chat, At a glance, Summary, Excel reports, Admin), the sidebar, login dialogs, charts, tables and download buttons. `app.py` defines the navigation and `app_pages/` holds each screen. It also provides Google sign-in (`st.login`) and secret storage (`secrets.toml`). Hosted for free on Streamlit Community Cloud. |
+| **Supabase** | An open-source backend platform built on a managed **PostgreSQL** database. | The **"memory"**. It stores (1) all the MIS register data loaded by the ETL scripts (one table per register or sheet), (2) the `_catalog` table that describes every dataset, and (3) the `_users` table with accounts, roles and approval status. Because it lives in the cloud, the app works from anywhere and nothing depends on a local PC. Needs `SUPABASE_DB_URL`. |
+| **GitHub** | A platform for hosting Git repositories. | The **"home of the code"**. It stores the source code and its version history, and is the link to deployment: Streamlit Community Cloud pulls the code from the GitHub repo and redeploys on every push. Secrets are never stored there (`.env` and `secrets.toml` are git-ignored). |
+
+**How they connect**
+
+```
+ Developer ──push code──► GitHub ──auto-deploys──► Streamlit Cloud (runs app.py)
+                                                        │
+                       ┌────────────────────────────────┤
+                       ▼                                ▼
+               Supabase PostgreSQL               Groq LLM API
+          (registers, _catalog, _users)     (question → SQL → explanation)
+```
+
+1. The developer pushes code to **GitHub**.
+2. **Streamlit** runs the app from that repo and shows the web interface to users.
+3. When a user asks a question, Streamlit passes it to **Groq**, which returns a SQL query.
+4. The query runs against **Supabase**, and the rows come back to Streamlit.
+5. Groq summarises the rows, and Streamlit shows the answer, the data and an Excel download.
+
+---
+
+## 4. How a question is answered (architecture)
 
 ```
  User question
@@ -83,7 +117,7 @@ Other highlights:
 
 ---
 
-## 4. Project structure – what each part does
+## 5. Project structure – what each part does
 
 ```
 .
@@ -132,7 +166,7 @@ Other highlights:
 
 ---
 
-## 5. Getting started (run locally)
+## 6. Getting started (run locally)
 
 ### Prerequisites
 * Python 3.12 or 3.13
@@ -176,7 +210,7 @@ Check the database connection on its own with `python db_connector.py`.
 
 ---
 
-## 6. Loading data into the database
+## 7. Loading data into the database
 
 ```bash
 pip install -r requirements-etl.txt
@@ -192,7 +226,7 @@ python etl/load_register.py --full   # reload everything
 
 ---
 
-## 7. Users, approval and security
+## 8. Users, approval and security
 
 1. A visitor signs up (email + password, or Google). The account starts as **pending**.
 2. The administrator opens **Admin → Users → Waiting for approval** and approves it.
@@ -204,7 +238,9 @@ into a chat or document.
 
 ---
 
-## 8. Deployment
+## 9. Deployment
+
+**Live deployment:** [https://hr-assistant-xomvicwp3juegurfnepflk.streamlit.app/](https://hr-assistant-xomvicwp3juegurfnepflk.streamlit.app/)
 
 The app is designed for **Streamlit Community Cloud**: push to GitHub, create the app with `app.py` as the
 main file, paste the secrets in *Advanced settings*. Full instructions, including Google sign-in setup, are in
@@ -212,7 +248,7 @@ main file, paste the secrets in *Advanced settings*. Full instructions, includin
 
 ---
 
-## 9. Example questions to try
+## 10. Example questions to try
 
 * How many rows are in the collection register?
 * Total premium collected by year from the collection register
@@ -222,6 +258,6 @@ main file, paste the secrets in *Advanced settings*. Full instructions, includin
 
 ---
 
-## 10. Author
+## 11. Author
 
 **Sunanda Biswas** – built for Green Delta Insurance's MIS team.

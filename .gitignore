@@ -9,4 +9,5 @@ etl/logs/
 .streamlit/secrets.toml
 users.db
 01 BASIC RAG
+Excel
 
