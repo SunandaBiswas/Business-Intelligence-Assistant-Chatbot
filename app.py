@@ -18,21 +18,24 @@ st.set_page_config(page_title="BUSINESS INTELLIGENCE ASSISTANT BOT - Green Delta
 logged_in = has_access()                  # logged in AND approved by the administrator
 
 
-def locked_page():
-    """What a visitor who is not logged in sees on the private pages (log in with the sidebar buttons)."""
+def welcome_page():
+    """What a visitor sees before logging in (log in with the sidebar buttons)."""
+    st.title("Welcome!")
     status = account_status() if current_user() else None
     if status == "pending":
         st.info("Your account is waiting for the administrator's approval. "
-                "You'll be able to open this page as soon as it is approved.", icon=":material/hourglass_top:")
+                "You'll be able to start as soon as it is approved.", icon=":material/hourglass_top:")
     elif status == "blocked":
         st.error("This account has been blocked. Please contact the administrator.", icon=":material/block:")
     else:
-        st.info("This page is private. Use **Log in** or **Sign up** in the sidebar to see it.",
-                icon=":material/lock:")
+        st.info("Use **Log in** or **Sign up** in the sidebar to get started.", icon=":material/login:")
 
 
-# (file, title, icon, url, help) - Chat is public; the other pages need a login
+# (file, title, icon, url, help) - every page needs a login (approved account)
 PRIVATE = [
+    ("app_pages/chat.py", "Chat", ":material/chat:", "chat",
+     "Ask questions about the MIS registers in plain English, or paste a SQL query. "
+     "Download any result as an Excel report."),
     ("app_pages/glance.py", "At a glance", ":material/dashboard:", "glance",
      "Summary tiles for every register: rows, date coverage, headline totals and when each file was "
      "last updated. Use Ask to question a register."),
@@ -43,15 +46,12 @@ PRIVATE = [
      "Department reports in your standard Excel format, and a pivot generator that delivers plain "
      "values or live formulas."),
 ]
-pages = [st.Page("app_pages/chat.py", title="Chat", icon=":material/chat:", url_path="chat", default=True,
-                 help="Ask questions about the MIS registers in plain English, or paste a SQL query. "
-                      "Download any result as an Excel report.")]
-for path, title, icon, url, hint in PRIVATE:
-    if logged_in:
-        pages.append(st.Page(path, title=title, icon=icon, url_path=url, help=hint))
-    else:                                              # visible in the menu, but locked
-        pages.append(st.Page(locked_page, title=title, icon=":material/lock:", url_path=url,
-                             help="Log in to open this page."))
+if logged_in:
+    pages = [st.Page(path, title=title, icon=icon, url_path=url, help=hint, default=(url == "chat"))
+             for path, title, icon, url, hint in PRIVATE]
+else:                                                  # before login: only the Welcome page, no locked tabs
+    pages = [st.Page(welcome_page, title="Welcome", icon=":material/waving_hand:", url_path="welcome",
+                     default=True)]
 if is_admin():                                       # the Admin page only exists in the menu for the administrator
     pages.append(st.Page("app_pages/admin.py", title="Admin", icon=":material/admin_panel_settings:",
                          url_path="admin", help="Manage accounts, check the data and system status."))
