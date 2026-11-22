@@ -11,3 +11,5 @@ users.db
 01 BASIC RAG
 Excel
 
+
+.streamlit/cloud_secrets.toml
