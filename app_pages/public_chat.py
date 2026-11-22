@@ -64,11 +64,22 @@ def _local_annual_report_context(question):
     if not ANNUAL_REPORT_DIR.exists():
         return "", []
 
+    available_reports = sorted(path.name for path in ANNUAL_REPORT_DIR.glob("*.pdf"))
+    if re.search(r"\b(which|what|list|available|availability)\b", question.lower()) and re.search(
+        r"\b(annual|reports?)\b", question.lower()
+    ):
+        return (
+            "Available annual report PDFs:\n" + "\n".join(available_reports),
+            [ANNUAL_REPORT_URL],
+        )
+
     try:
         from sklearn.feature_extraction.text import TfidfVectorizer
         from sklearn.metrics.pairwise import cosine_similarity
-    except ImportError:
-        return "", []
+    except ImportError as exc:
+        raise RuntimeError(
+            "RAG dependency missing. Install project requirements in the active app environment."
+        ) from exc
 
     question_lower = question.lower()
     year_match = re.search(r"\b(19[789]\d|20\d{2})\b", question)
@@ -85,8 +96,8 @@ def _local_annual_report_context(question):
         if text_path.exists() and text_path.stat().st_size > 0:
             text = text_path.read_text(encoding="utf-8", errors="replace")
             text = re.sub(r"\s+", " ", text).strip()
-            for chunk_number, offset in enumerate(range(0, len(text), 1300), start=1):
-                chunk = text[offset:offset + 1800]
+            for chunk_number, offset in enumerate(range(0, len(text), 1400), start=1):
+                chunk = text[offset:offset + 1600]
                 if len(chunk) < 250:
                     continue
                 chunks.append({
@@ -133,7 +144,7 @@ def _local_annual_report_context(question):
             f"- Section {item['chunk']}\n{item['text']}"
         )
         sources.append(f"{ANNUAL_REPORT_URL}#{item['report']}")
-        if len(selected) >= 12:
+        if len(selected) >= 5:
             break
 
     if not selected:
@@ -146,21 +157,28 @@ def _local_annual_report_context(question):
 def _public_context(question):
     sources = [ANNUAL_REPORT_URL]
     extracted = []
+    available_reports = sorted(path.name for path in ANNUAL_REPORT_DIR.glob("*.pdf"))
+    if available_reports:
+        extracted.append(
+            "Available annual reports in the local public collection:\n"
+            + "\n".join(available_reports)
+        )
 
     local_context, local_sources = _local_annual_report_context(question)
     if local_context:
         extracted.append(local_context)
         sources = local_sources + sources
 
+    lower_question = question.lower()
+    if re.search(r"\b(annual|report|financial statement|financial highlight)\b", lower_question):
+        return "\n\n".join(extracted)[:12000], list(dict.fromkeys(sources))
+
     try:
         llms_text = _fetch_text(LLMS_URL)
     except Exception:
         llms_text = None
     if llms_text:
-        extracted.append(f"Source: {LLMS_URL}\n{llms_text[:30000]}")
-
         links = re.findall(r"\[([^\]]+)\]\((https://green-delta\.com[^)]+)\)", llms_text)
-        lower_question = question.lower()
         keywords = set(re.findall(r"[a-z0-9]+", lower_question))
         scored = []
         for title, url in links:
@@ -172,21 +190,21 @@ def _public_context(question):
             if score:
                 scored.append((score, title, url))
 
-        for _, title, url in sorted(scored, reverse=True)[:3]:
+        for _, title, url in sorted(scored, reverse=True)[:2]:
             try:
                 page = _fetch_text(url)
                 if not page:
                     continue
                 parser = _TextExtractor()
                 parser.feed(page)
-                text = parser.text()[:12000]
+                text = parser.text()[:3500]
                 if text:
                     extracted.append(f"Source: {url}\n{text}")
                     sources.append(url)
             except Exception:
                 continue
 
-    return "\n\n".join(extracted), sources
+    return "\n\n".join(extracted)[:12000], list(dict.fromkeys(sources))
 
 
 def _groq_answer(question, history, context, sources):
@@ -203,7 +221,7 @@ def _groq_answer(question, history, context, sources):
 
     history_text = "\n".join(
         f"{message['role'].capitalize()}: {message['content']}"
-        for message in history[-8:]
+        for message in history[-4:]
     )
     source_list = "\n".join(f"- {url}" for url in dict.fromkeys(sources))
     system = (
@@ -217,14 +235,15 @@ def _groq_answer(question, history, context, sources):
     )
     user = (
         f"Question: {question}\n\n"
-        f"Conversation:\n{history_text or '(none)'}\n\n"
-        f"Public context:\n{context[:60000]}\n\n"
+        f"Conversation:\n{history_text[:2000] or '(none)'}\n\n"
+        f"Public context:\n{context[:12000]}\n\n"
         f"Available source URLs:\n{source_list}"
     )
     client = Groq(api_key=api_key)
     response = client.chat.completions.create(
         model=os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"),
         temperature=0,
+        max_tokens=1200,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -272,6 +291,16 @@ st.caption(
 )
 
 st.session_state.setdefault("public_messages", [])
+stale_fallback = "I could not retrieve the official public pages right now."
+for message_index, message in enumerate(st.session_state.public_messages):
+    if message["role"] == "assistant" and message["content"].startswith(stale_fallback):
+        if message_index > 0 and st.session_state.public_messages[message_index - 1]["role"] == "user":
+            stale_question = st.session_state.public_messages[message_index - 1]["content"]
+            st.session_state.pending_public = stale_question
+            del st.session_state.public_messages[message_index - 1:message_index + 1]
+        else:
+            del st.session_state.public_messages[message_index]
+        break
 
 if not st.session_state.public_messages:
     st.markdown("**Suggested questions**")
@@ -329,12 +358,10 @@ if question:
             context, sources = _public_context(question)
             answer = _groq_answer(question, history, context, sources)
     except Exception as exc:
-        del exc
         answer = (
-            "I could not retrieve the official public pages right now. "
-            f"You can open the [Annual Report_GDIC page]({ANNUAL_REPORT_URL})."
+            f"Public Chat could not complete this request ({type(exc).__name__}). "
+            f"Please try again, or open the [Annual Report_GDIC page]({ANNUAL_REPORT_URL})."
         )
-        # Do not expose implementation or network errors to public users.
 
     reply = {"role": "assistant", "content": answer}
     st.session_state.public_messages.append(reply)
