@@ -7,5 +7,6 @@ psycopg[binary]>=3.2
 python-dotenv
 groq
 pypdf
+scikit-learn
 openpyxl
 Authlib          # Google sign-in (st.login)

@@ -60,27 +60,21 @@ def _fetch_pdf(url, timeout=30):
 
 @st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
 def _local_annual_report_context(question):
-    """Extract relevant pages from locally downloaded annual reports."""
-    from pypdf import PdfReader
-
+    """Retrieve relevant chunks from the locally downloaded annual reports."""
     if not ANNUAL_REPORT_DIR.exists():
+        return "", []
+
+    try:
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        from sklearn.metrics.pairwise import cosine_similarity
+    except ImportError:
         return "", []
 
     question_lower = question.lower()
     year_match = re.search(r"\b(19[789]\d|20\d{2})\b", question)
     requested_year = year_match.group(1) if year_match else None
 
-    stop_words = {
-        "the", "a", "an", "and", "or", "of", "to", "for", "from", "what", "which",
-        "where", "when", "how", "does", "did", "is", "are", "can", "in", "on",
-    }
-    keywords = {
-        word for word in re.findall(r"[a-z0-9]+", question_lower)
-        if len(word) >= 3 and word not in stop_words
-    }
-
-    selected = []
-    sources = []
+    chunks = []
     for pdf_path in sorted(ANNUAL_REPORT_DIR.glob("*.pdf")):
         report_year_match = re.search(r"20\d{2}|19\d{2}", pdf_path.name)
         report_year = report_year_match.group(0) if report_year_match else None
@@ -90,66 +84,62 @@ def _local_annual_report_context(question):
         text_path = ANNUAL_REPORT_TEXT_DIR / f"{pdf_path.stem}.txt"
         if text_path.exists() and text_path.stat().st_size > 0:
             text = text_path.read_text(encoding="utf-8", errors="replace")
-            matches = []
-            for chunk_number, offset in enumerate(range(0, len(text), 7000), start=1):
-                chunk = re.sub(r"\s+", " ", text[offset:offset + 7000])
-                normalized = chunk.lower()
-                score = sum(normalized.count(word) for word in keywords)
-                if report_year and report_year in question_lower:
-                    score += 25
-                if score:
-                    matches.append((score, chunk_number, chunk))
-            if matches:
-                top_pages = sorted(matches, reverse=True)[:8]
-                page_text = "\n".join(
-                    f"[Section {section}] {chunk}"
-                    for _, section, chunk in top_pages
-                )
-                selected.append(
-                    f"Source: {ANNUAL_REPORT_URL} - Local report: {pdf_path.name}\n{page_text}"
-                )
-                sources.append(f"{ANNUAL_REPORT_URL}#{pdf_path.name}")
-            continue
-
-        try:
-            reader = PdfReader(str(pdf_path))
-            if len(reader.pages) == 0:
-                continue
-
-            pdf_matches = []
-            for page_number, page in enumerate(reader.pages, start=1):
-                text = (page.extract_text() or "").strip()
-                if not text:
+            text = re.sub(r"\s+", " ", text).strip()
+            for chunk_number, offset in enumerate(range(0, len(text), 1300), start=1):
+                chunk = text[offset:offset + 1800]
+                if len(chunk) < 250:
                     continue
-                normalized = text.lower()
-                score = sum(normalized.count(word) for word in keywords)
-                if report_year and report_year in question_lower:
-                    score += 25
-                if score:
-                    pdf_matches.append((score, page_number, re.sub(r"\s+", " ", text)[:7000]))
+                chunks.append({
+                    "report": pdf_path.name,
+                    "year": report_year,
+                    "chunk": chunk_number,
+                    "text": chunk,
+                })
 
-            if pdf_matches:
-                top_pages = sorted(pdf_matches, reverse=True)[:8]
-                page_text = "\n".join(
-                    f"[Page {page_number}] {text}"
-                    for _, page_number, text in top_pages
-                )
-                selected.append(
-                    f"Source: {ANNUAL_REPORT_URL} - Local report: {pdf_path.name}\n{page_text}"
-                )
-                sources.append(f"{ANNUAL_REPORT_URL}#{pdf_path.name}")
-        except Exception:
+    if not chunks:
+        available = [path.name for path in sorted(ANNUAL_REPORT_DIR.glob("*.pdf"))]
+        return "Available local annual reports:\n" + "\n".join(available), [ANNUAL_REPORT_URL]
+
+    documents = [item["text"] for item in chunks]
+    vectorizer = TfidfVectorizer(
+        lowercase=True,
+        stop_words="english",
+        ngram_range=(1, 2),
+        sublinear_tf=True,
+        max_features=100000,
+    )
+    matrix = vectorizer.fit_transform(documents)
+    query_vector = vectorizer.transform([question])
+    scores = cosine_similarity(query_vector, matrix).ravel()
+
+    ranked = sorted(
+        range(len(chunks)),
+        key=lambda index: scores[index],
+        reverse=True,
+    )
+    selected = []
+    sources = []
+    seen_reports = set()
+    for index in ranked:
+        item = chunks[index]
+        if scores[index] <= 0:
             continue
+        report_key = (item["report"], item["chunk"])
+        if report_key in seen_reports:
+            continue
+        seen_reports.add(report_key)
+        selected.append(
+            f"Source: {ANNUAL_REPORT_URL} - Local report: {item['report']} "
+            f"- Section {item['chunk']}\n{item['text']}"
+        )
+        sources.append(f"{ANNUAL_REPORT_URL}#{item['report']}")
+        if len(selected) >= 12:
+            break
 
     if not selected:
-        available = [
-            path.name for path in sorted(ANNUAL_REPORT_DIR.glob("*.pdf"))
-        ]
-        return (
-            "Available local annual reports:\n" + "\n".join(available),
-            [ANNUAL_REPORT_URL],
-        )
-    return "\n\n".join(selected[:12]), sources[:12]
+        available = [path.name for path in sorted(ANNUAL_REPORT_DIR.glob("*.pdf"))]
+        return "Available local annual reports:\n" + "\n".join(available), [ANNUAL_REPORT_URL]
+    return "\n\n".join(selected), list(dict.fromkeys(sources))
 
 
 @st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
