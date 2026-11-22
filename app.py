@@ -20,15 +20,22 @@ logged_in = has_access()                  # logged in AND approved by the admini
 
 def welcome_page():
     """What a visitor sees before logging in (log in with the sidebar buttons)."""
-    st.title("Welcome!")
     status = account_status() if current_user() else None
     if status == "pending":
-        st.info("Your account is waiting for the administrator's approval. "
-                "You'll be able to start as soon as it is approved.", icon=":material/hourglass_top:")
+        st.info(
+            "Your account is waiting for the administrator's approval.",
+            icon=":material/hourglass_top:",
+        )
     elif status == "blocked":
-        st.error("This account has been blocked. Please contact the administrator.", icon=":material/block:")
+        st.error(
+            "This account has been blocked. Please contact the administrator.",
+            icon=":material/block:",
+        )
     else:
-        st.info("Use **Log in** or **Sign up** in the sidebar to get started.", icon=":material/login:")
+        st.info(
+            "Use **Log in** or **Sign up** in the sidebar to get started.",
+            icon=":material/login:",
+        )
 
 
 # (file, title, icon, url, help) - every page needs a login (approved account)
