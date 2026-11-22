@@ -1,3 +1,4 @@
+import html
 import os
 import re
 import urllib.request
@@ -16,10 +17,12 @@ ANNUAL_REPORT_TEXT_DIR = ANNUAL_REPORT_DIR.parent / "annual_report_text"
 load_dotenv()
 
 FAQS = [
-    "Which annual reports are available?",
-    "Where can I find GDIC financial highlights?",
-    "What insurance products does Green Delta offer?",
-    "How can I contact Green Delta Insurance?",
+    "Which annual report PDFs are available?",
+    "Summarize the key financial highlights for 2024.",
+    "What was the gross premium in 2024?",
+    "What was the profit after tax in 2024?",
+    "What were the total assets in 2024?",
+    "Compare gross premiums in 2023 and 2024.",
 ]
 
 
@@ -29,12 +32,24 @@ class _TextExtractor(HTMLParser):
         self.parts = []
 
     def handle_data(self, data):
-        text = re.sub(r"\s+", " ", data).strip()
+        text = _plain_text(data)
         if text:
             self.parts.append(text)
 
     def text(self):
         return "\n".join(dict.fromkeys(self.parts))
+
+
+def _plain_text(value):
+    """Decode HTML entities and remove markup before text reaches the UI or model."""
+    text = html.unescape(html.unescape(value))
+    text = re.sub(r"<\s*br\b[^>]*>", " ", text, flags=re.I)
+    text = re.sub(r"</?(?:td|th)\b[^>]*>", " | ", text, flags=re.I)
+    text = re.sub(r"</?(?:p|div|li|tr|h[1-6]|ul|ol)\b[^>]*>", "\n", text, flags=re.I)
+    text = re.sub(r"<[^>]*>", "", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r" *\n *", "\n", text)
+    return text.strip()
 
 
 def _fetch_text(url, timeout=20):
@@ -220,7 +235,7 @@ def _groq_answer(question, history, context, sources):
         return "The public chat is temporarily unavailable because the chat service is not configured."
 
     history_text = "\n".join(
-        f"{message['role'].capitalize()}: {message['content']}"
+        f"{message['role'].capitalize()}: {_plain_text(message['content'])}"
         for message in history[-4:]
     )
     source_list = "\n".join(f"- {url}" for url in dict.fromkeys(sources))
@@ -230,6 +245,7 @@ def _groq_answer(question, history, context, sources):
         "Do not use or reveal private MIS, database, account, internal, or confidential information. "
         "If the context does not contain the answer, say that it is not available on the provided public pages "
         "and suggest the Annual Report_GDIC page or another official public page. "
+        "Write readable plain text with simple bullets when useful. Never output HTML tags or HTML entities. "
         "Be concise, factual, and distinguish a report year clearly. "
         "End with a short 'Public sources:' section listing only the supplied source URLs."
     )
@@ -249,7 +265,7 @@ def _groq_answer(question, history, context, sources):
             {"role": "user", "content": user},
         ],
     )
-    return (response.choices[0].message.content or "").strip()
+    return _plain_text(response.choices[0].message.content or "")
 
 
 st.html("""
@@ -302,18 +318,29 @@ for message_index, message in enumerate(st.session_state.public_messages):
             del st.session_state.public_messages[message_index]
         break
 
-if not st.session_state.public_messages:
-    st.markdown("**Suggested questions**")
-    for faq in FAQS:
-        st.button(faq, key=f"public_faq_{faq}", width="stretch",
-                  on_click=lambda question=faq: st.session_state.update(pending_public=question))
-
 for message in st.session_state.public_messages:
+    if message["role"] == "assistant":
+        message["content"] = _plain_text(message["content"])
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
 with st.bottom:
-    chat_col, clear_col = st.columns([8, 1.5], vertical_alignment="center")
+    faq_col, chat_col, clear_col = st.columns([1.25, 7.5, 1.5], vertical_alignment="center")
+    with faq_col:
+        with st.popover(
+            "FAQs",
+            icon=":material/lightbulb:",
+            help="Choose a suggested question based on the public annual reports.",
+            width="stretch",
+        ):
+            st.caption("Questions from the public annual reports")
+            for faq_index, faq in enumerate(FAQS):
+                st.button(
+                    faq,
+                    key=f"public_faq_{faq_index}",
+                    width="stretch",
+                    on_click=lambda question=faq: st.session_state.update(pending_public=question),
+                )
     with chat_col:
         question = st.chat_input("Ask about public Green Delta information...")
     with clear_col:
