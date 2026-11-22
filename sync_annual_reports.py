@@ -1,6 +1,7 @@
 import re
 import urllib.request
 from pathlib import Path
+from pypdf import PdfReader
 
 
 SITE_URL = "https://green-delta.com/financial_indicator/annual-reports/"
@@ -37,6 +38,25 @@ def download_all():
     files = sorted(OUTPUT_DIR.glob("*.pdf"))
     print(f"Annual report folder contains {len(files)} PDFs.")
     print(f"Downloaded {downloaded} new or repaired PDFs.")
+    build_text_index(files)
+
+
+def build_text_index(files):
+    text_dir = OUTPUT_DIR.parent / "annual_report_text"
+    text_dir.mkdir(parents=True, exist_ok=True)
+    for pdf_path in files:
+        text_path = text_dir / f"{pdf_path.stem}.txt"
+        if text_path.exists():
+            continue
+        try:
+            reader = PdfReader(str(pdf_path))
+            text = "\n".join(
+                (page.extract_text() or "").strip()
+                for page in reader.pages
+            )
+            text_path.write_text(text, encoding="utf-8")
+        except Exception as exc:
+            print(f"Could not extract {pdf_path.name}: {exc}")
 
 
 if __name__ == "__main__":

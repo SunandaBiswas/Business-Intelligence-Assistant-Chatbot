@@ -3,6 +3,7 @@ import re
 import urllib.request
 from html.parser import HTMLParser
 from pathlib import Path
+from dotenv import load_dotenv
 
 import streamlit as st
 
@@ -11,6 +12,8 @@ SITE_ROOT = "https://green-delta.com"
 ANNUAL_REPORT_URL = f"{SITE_ROOT}/financial_indicator/annual-reports/"
 LLMS_URL = f"{SITE_ROOT}/llms.txt"
 ANNUAL_REPORT_DIR = Path(__file__).resolve().parents[1] / "public_data" / "annual_reports"
+ANNUAL_REPORT_TEXT_DIR = ANNUAL_REPORT_DIR.parent / "annual_report_text"
+load_dotenv()
 
 FAQS = [
     "Which annual reports are available?",
@@ -82,6 +85,30 @@ def _local_annual_report_context(question):
         report_year_match = re.search(r"20\d{2}|19\d{2}", pdf_path.name)
         report_year = report_year_match.group(0) if report_year_match else None
         if requested_year and report_year and report_year != requested_year:
+            continue
+
+        text_path = ANNUAL_REPORT_TEXT_DIR / f"{pdf_path.stem}.txt"
+        if text_path.exists() and text_path.stat().st_size > 0:
+            text = text_path.read_text(encoding="utf-8", errors="replace")
+            matches = []
+            for chunk_number, offset in enumerate(range(0, len(text), 7000), start=1):
+                chunk = re.sub(r"\s+", " ", text[offset:offset + 7000])
+                normalized = chunk.lower()
+                score = sum(normalized.count(word) for word in keywords)
+                if report_year and report_year in question_lower:
+                    score += 25
+                if score:
+                    matches.append((score, chunk_number, chunk))
+            if matches:
+                top_pages = sorted(matches, reverse=True)[:8]
+                page_text = "\n".join(
+                    f"[Section {section}] {chunk}"
+                    for _, section, chunk in top_pages
+                )
+                selected.append(
+                    f"Source: {ANNUAL_REPORT_URL} - Local report: {pdf_path.name}\n{page_text}"
+                )
+                sources.append(f"{ANNUAL_REPORT_URL}#{pdf_path.name}")
             continue
 
         try:
@@ -176,6 +203,11 @@ def _groq_answer(question, history, context, sources):
     from groq import Groq
 
     api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        try:
+            api_key = st.secrets["GROQ_API_KEY"]
+        except Exception:
+            api_key = None
     if not api_key:
         return "The public chat is temporarily unavailable because the chat service is not configured."
 
