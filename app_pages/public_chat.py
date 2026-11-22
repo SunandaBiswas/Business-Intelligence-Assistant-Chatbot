@@ -294,7 +294,37 @@ for message in st.session_state.public_messages:
         st.markdown(message["content"])
 
 with st.bottom:
-    question = st.chat_input("Ask about public Green Delta information...")
+    chat_col, clear_col = st.columns([8, 1.5], vertical_alignment="center")
+    with chat_col:
+        question = st.chat_input("Ask about public Green Delta information...")
+    with clear_col:
+        clear_clicked = st.button(
+            "Clear chat",
+            icon=":material/delete:",
+            width="stretch",
+            key="public_chat_clear",
+        )
+    st.html("""
+    <style>
+      [data-testid="stChatInput"] { min-height: 3rem; }
+      .st-key-public_chat_clear button {
+        height: 3rem;
+        min-height: 3rem;
+        color: #B3261E;
+        border-color: #E4A8A4;
+        background: #FDF1F0;
+      }
+      .st-key-public_chat_clear button:hover {
+        color: #FFFFFF;
+        background: #C62828;
+        border-color: #C62828;
+      }
+    </style>
+    """)
+
+if clear_clicked:
+    st.session_state.public_messages = []
+    st.rerun()
 
 question = question or st.session_state.pop("pending_public", None)
 
